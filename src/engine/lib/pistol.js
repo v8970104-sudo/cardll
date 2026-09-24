@@ -36,6 +36,12 @@ function hs507(ctx) {
   k.add("steel", T(cylZ(1.4, 15.4, 16.4, { seg: 10 }), { p: [-15, 8, 0] }));
   for (const x of [-16, -8]) k.add("rubber", T(cylZ(2.6, -14.8, -13, { c: 0.6, seg: 14 }), { p: [x, 9, 0] }));
   k.add("steel", T(cylY(2.4, 13.5, 15, { seg: 14 }), { p: [-15, 0, 0] }));
+  k.add("lensBlack", T(box(3.4, 0.5, 0.6, { bevel: 0.1 }), { p: [-15, 15, 0] }));
+  k.add("lensBlack", T(box(0.6, 3.4, 0.5, { bevel: 0.1 }), { p: [-15, 8, 16.4] }));
+  for (let i = 0; i < 6; i++) k.add("alu", T(box(0.8, 9, 0.6, { bevel: 0.2 }), { p: [-17 + i * 3, 8, 15.7] }));
+  // окно излучателя и торцевые винты
+  k.add("lensBlack", extrudeX(rrect(0, 11, 5, 2.4, 1), -6.8, -6.2, { bevel: 0.1 }));
+  for (const s2 of [-1, 1]) k.add("steel", T(capScrew(1.4, 0.6), { r: [s2 * 90, 0, 0] }), { p: [14, 3.5, s2 * 13] });
   const glass = lens(ctx, extrudeX(shape(arch(10, 24.2, 9.6)), 12, 13, { bevel: 0.2 }), "glassBlue");
   return { root: node("hs507", [k.build(), glass]), sight: { y: A + 0.6, z: 0, x0: -22, x1: 16, r: 9, mag: 1, reticle: "holo", lens: glass } };
 }
@@ -48,6 +54,12 @@ function acroP2(ctx) {
   for (const x of [-26, 25]) k.add("alu", T(extrudeX(shape(rrect(0, 15, 31, 30, 5.5), [rrect(0, A, 21, 16, 3)]), -1.2, 1.2, { bevel: 0.6 }), { p: [x, 0, 0] }));
   k.add("alu", T(cylZ(6, 15, 19, { c: 1, seg: 24 }), { p: [-10, 14, 0] }));
   for (const x of [4, 12]) k.add("rubber", T(cylZ(2.4, -16.8, -15, { c: 0.6, seg: 14 }), { p: [x, 21, 0] }));
+  k.add("alu", T(ctx.C.knob(6.4, 1.6, 20), { r: [0, -90, 0], p: [-10, 14, 19] }));
+  k.add("lensBlack", T(box(5, 0.8, 0.6, { bevel: 0.1 }), { p: [-10, 14, 20.7] }));
+  k.add("steel", T(cylY(2.2, 29, 30.4, { seg: 14 }), { p: [-6, 0, 0] }));
+  k.add("lensBlack", T(box(3, 0.5, 0.6, { bevel: 0.1 }), { p: [-6, 30.4, 0] }));
+  k.add("steel", T(cylZ(2.2, 14.8, 16.2, { seg: 14 }), { p: [6, 8, 0] }));
+  for (const x of [-18, 18]) for (const s2 of [-1, 1]) k.add("steel", T(capScrew(1.3, 0.5), { r: [s2 * 90, 0, 0] }), { p: [x, 3, s2 * 15.2] });
   const glass = lens(ctx, extrudeX(rrect(0, A, 22, 17, 3), 18, 19, { bevel: 0.2 }), "glassRed");
   const rear = lens(ctx, extrudeX(rrect(0, A, 22, 17, 3), -22, -21, { bevel: 0.2 }), "glassBlue");
   return { root: node("acro", [k.build(), glass, rear]), sight: { y: A, z: 0, x0: -24, x1: 23, r: 8, mag: 1, reticle: "dot", lens: glass } };
@@ -58,14 +70,22 @@ function pistolLight(ctx, o) {
   const { x0, x1, w, h, headR } = o;
   const cy = 6 + h / 2;
   // зацеп рельса + поперечина-упор, входящая в паз
-  k.add(o.mat || "alu", extrudeX(shape([[-w / 2, 0.5, 1], [w / 2, 0.5, 1], [w / 2, 7], [-w / 2, 7]]), -14, 12, { bevel: 0.8 }));
-  for (const s of [-1, 1]) k.add(o.mat || "alu", extrudeX([[s * 9.6, -1], [s * 12, -1], [s * 12, 1.5], [s * 9.6, 1.5]], -14, 12, { bevel: 0.3 }));
+  // губки зажима охватывают рельс рамки (рамка начинается в 4 мм над гранью рельса)
+  k.add(o.mat || "alu", clampBody(-14, 12, 7, { w, jaw: -3.9, r: 1 }));
   k.add("steel", T(box(4, 3, 16), { p: [0, -0.6, 0] }));
   k.add(o.mat || "alu", extrudeX(rrect(0, cy, w, h, Math.min(w, h) * 0.3), x0, x1 - 14, { bevel: 1.6 }));
   k.add(o.mat || "alu", T(latheX([[x1 - 16, 0], [x1 - 16, h * 0.46], [x1 - 10, headR], [x1, headR], [x1, headR - 1.6], [x1 - 1, headR - 2.4]], { seg: 36 }), { p: [0, cy, 0] }));
   k.add("steel", T(tubeX(headR + 0.2, headR - 2.2, x1 - 2.4, x1 + 0.4, { seg: 36 }), { p: [0, cy, 0] }));
-  // амбидекстральные клавиши сзади
-  for (const s of [-1, 1]) k.add("poly", T(extrudeZ([[0, 0], [9, 0], [12, 7, 2], [0, 9, 2]], 4, { bevel: 0.8 }), { p: [x0 - 8, cy - 3, s * (w / 2 - 1)] }));
+  // амбидекстральные клавиши сзади с рифлением
+  for (const s of [-1, 1]) {
+    k.add("poly", T(extrudeZ([[0, 0], [9, 0], [12, 7, 2], [0, 9, 2]], 4, { bevel: 0.8 }), { p: [x0 - 8, cy - 3, s * (w / 2 - 1)] }));
+    for (let i = 0; i < 3; i++) k.add("poly", T(box(0.8, 6, 1, { bevel: 0.25 }), { p: [x0 - 6 + i * 2.6, cy + 1.2, s * (w / 2 + 1.2)] }));
+  }
+  // винт зажима сбоку, поясок у головы, болты корпуса
+  k.add("steel", T(thumbNut(4.4, 2.6, 6), { r: [0, -90, 0], p: [-1, 3.2, w / 2] }));
+  k.add(o.mat || "alu", extrudeX(rrect(0, cy, w + 0.8, h + 0.8, Math.min(w, h) * 0.3 + 0.4), x1 - 22, x1 - 18, { bevel: 0.6 }));
+  for (const s of [-1, 1]) for (const x of [x0 + 6, x1 - 26]) k.add("steel", T(capScrew(1.3, 0.5), { r: [s * 90, 0, 0] }), { p: [x, cy + h * 0.2, s * w / 2] });
+  if (o.crenel) for (let i = 0; i < 6; i++) k.add("steel", T(T(box(1.8, 1.8, 4, { bevel: 0.4 }), { p: [x1 + 1, headR - 1.2, 0] }), { r: [i * 60 + 30, 0, 0], p: [0, cy, 0] }));
   const root = node(o.name, [k.build()]);
   const head = lampHead(ctx, headR - 2.2, x1 - 0.6, x1 - (o.turbo ? 22 : 11), cy, o);
   root.add(head.group);
@@ -88,7 +108,7 @@ var PISTOL = [
   { id: "rmr_t2", cat: "micro", name: "Trijicon RMR Type 2", desc: "Точка 3,25 MOA, самый живучий корпус", stats: { weight: 34, ergo: -1, adsTime: 10 }, build: rmrPistol },
   { id: "hs507c", cat: "micro", name: "Holosun HS507C X2", desc: "Кольцо 32 MOA + точка 2 MOA", stats: { weight: 43, ergo: -1, adsTime: 12 }, build: hs507 },
   { id: "acro_p2", cat: "micro", name: "Aimpoint ACRO P-2", desc: "Закрытый излучатель: грязь и вода не мешают", stats: { weight: 60, ergo: -2, adsTime: 14 }, build: acroP2 },
-  { id: "x300u", cat: "plight", name: "SureFire X300U-B", desc: "Фонарь 1000 лм / 12 000 кд, зацеп за паз рамки", foot: [-6, 6], body: [-20, 70], stats: { weight: 116, ergo: -3 }, build: (c) => pistolLight(c, { name: "x300", x0: -12, x1: 70, w: 30, h: 26, headR: 15.5, lm: 1e3, cd: 12e3, hot: 0.2, spill: 0.12, kelvin: 6400, batt: 22 }) },
+  { id: "x300u", cat: "plight", name: "SureFire X300U-B", desc: "Фонарь 1000 лм / 12 000 кд, зацеп за паз рамки", foot: [-6, 6], body: [-20, 70], stats: { weight: 116, ergo: -3 }, build: (c) => pistolLight(c, { crenel: true, name: "x300", x0: -12, x1: 70, w: 30, h: 26, headR: 15.5, lm: 1e3, cd: 12e3, hot: 0.2, spill: 0.12, kelvin: 6400, batt: 22 }) },
   { id: "x300t", cat: "plight", name: "SureFire X300T-B Turbo", desc: "650 лм / 50 000 кд: узкий дальнобойный луч, длинная голова", foot: [-6, 6], body: [-20, 84], stats: { weight: 136, ergo: -4 }, build: (c) => pistolLight(c, { name: "x300t", x0: -12, x1: 84, w: 30, h: 26, headR: 19, lm: 650, cd: 5e4, hot: 0.08, spill: 0.04, kelvin: 6000, batt: 26, turbo: true }) },
   { id: "tlr7a", cat: "plight", name: "Streamlight TLR-7A", desc: "Компактный фонарь 500 лм / 5000 кд", foot: [-6, 6], body: [-18, 52], stats: { weight: 71, ergo: -1 }, build: (c) => pistolLight(c, { name: "tlr7", x0: -10, x1: 52, w: 27, h: 22, headR: 12, lm: 500, cd: 5e3, hot: 0.24, spill: 0.14, kelvin: 6500, batt: 28, mat: "poly" }) },
   { id: "tlr1hl", cat: "plight", name: "Streamlight TLR-1 HL", desc: "1000 лм / 13 000 кд, алюминиевый корпус", foot: [-6, 6], body: [-20, 74], stats: { weight: 122, ergo: -3 }, build: (c) => pistolLight(c, { name: "tlr1", x0: -12, x1: 74, w: 31, h: 25, headR: 15, lm: 1e3, cd: 13e3, hot: 0.19, spill: 0.11, kelvin: 5900, batt: 24 }) },

@@ -102,13 +102,20 @@ body.noui .ui{display:none}
 .a-n small{font-size:14px;color:var(--tx3);font-weight:600;margin-left:3px}
 .ammo.low .a-n{color:var(--bad)}
 .a-batt{display:flex;flex-direction:column;gap:4px;margin-left:4px;padding-left:12px;border-left:1px solid var(--line)}
-.a-batt .bt{display:grid;grid-template-columns:78px 54px 34px;align-items:center;gap:6px;font-size:11px;color:var(--tx3)}
+.a-batt .bt{display:grid;grid-template-columns:118px 54px 62px;align-items:center;gap:6px;font-size:11px;color:var(--tx3)}
+.a-batt .bt span{display:flex;align-items:center;gap:5px;white-space:nowrap}
+.a-batt kbd{font:600 9.5px/1 var(--f);padding:2px 4px;border-radius:3px;border:1px solid var(--line2);color:var(--tx2)}
+.shot-info{position:fixed;left:50%;top:62px;transform:translateX(-50%);padding:6px 12px;border-radius:8px;background:rgba(18,20,24,.88);border:1px solid var(--line);font-size:12px;color:var(--tx2);display:none;white-space:nowrap;font-variant-numeric:tabular-nums}
+.shot-info.on{display:block}
+.shot-info b{color:var(--tx);font-weight:650;margin-right:4px}
+.ads-hint i{font-style:normal;color:var(--acc)}
 .a-batt .bt.on span{color:var(--tx)}
 .a-batt i{display:block;height:6px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden}
 .a-batt em{display:block;height:100%;background:var(--good)}
 .a-batt .bt.low em{background:var(--bad)}
 .a-batt .bt.low b{color:var(--bad)}
 .a-batt b{font-weight:650;color:var(--tx2);text-align:right;font-variant-numeric:tabular-nums}
+.a-batt b small{font-weight:500;font-size:9.5px;color:var(--tx3);margin-left:3px}
 .a-m{display:flex;flex-direction:column;gap:3px}
 .a-m b{font-size:12px;letter-spacing:.08em;color:var(--acc)}
 .a-m span{font-size:12px;color:var(--tx2)}
@@ -140,8 +147,7 @@ body.noui .ui{display:none}
   background:radial-gradient(circle at 50% 50%, transparent 0, transparent calc(min(40vw,40vh) - 18px), rgba(0,8,0,.7) calc(min(40vw,40vh) - 4px), #000 min(40vw,40vh))}
 body.nv .nv-ov{display:block}
 body.nv canvas{filter:grayscale(1) sepia(1) hue-rotate(52deg) saturate(2.6) brightness(1.1) contrast(1.2)}
-.s-ret{position:absolute;left:50%;top:50%;width:calc(min(84vw,84vh));height:calc(min(84vw,84vh));transform:translate(-50%,-50%)}
-.s-ret svg{width:100%;height:100%}
+.s-ret{position:absolute;inset:0;overflow:hidden}
 
 @media (max-width:1180px){
   .col-left{width:236px}

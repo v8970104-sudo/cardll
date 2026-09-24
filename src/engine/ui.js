@@ -51,7 +51,8 @@ var UI = class {
       <div><kbd>Пробел</kbd>огонь (в прицеле — ЛКМ)</div><div><kbd>ПКМ</kbd><kbd>F</kbd>прицелиться</div>
       <div><kbd>R</kbd>перезарядка</div><div><kbd>X</kbd>режим огня</div><div><kbd>V</kbd>сменить прицел</div>
       <div><kbd>N</kbd>откинуть увеличитель</div><div><kbd>Колесо</kbd>кратность / зум</div>
-      <div><kbd>C</kbd>фонарь</div><div><kbd>Z</kbd>ЛЦУ</div><div><kbd>U</kbd>заменить батареи</div><div><kbd>L</kbd>день / сумерки / ночь</div><div><kbd>B</kbd>сошки</div><div><kbd>K</kbd>приклад</div>
+      <div><kbd>G</kbd>сменить прицельную сетку</div><div><kbd>Shift</kbd><kbd>G</kbd>цвет подсветки сетки</div><div><kbd>Y</kbd>трасса пули: след / трассер / выкл</div>
+      <div><kbd>C</kbd>фонарь (основной)</div><div><kbd>Shift</kbd><kbd>C</kbd>второй фонарь</div><div><kbd>Z</kbd>ЛЦУ (основной)</div><div><kbd>Shift</kbd><kbd>Z</kbd>второй ЛЦУ</div><div><kbd>U</kbd>заменить батареи</div><div><kbd>L</kbd>день / сумерки / ночь</div><div><kbd>B</kbd>сошки</div><div><kbd>K</kbd>приклад</div>
       <div><kbd>T</kbd>${esc(d.chargeLabel || "затвор")}</div>${d.feed === "tube" ? "" : "<div><kbd>M</kbd>магазин</div>"}<div><kbd>H</kbd>эта подсказка</div>
       <div class="h-n">Клик по детали — открыть её слот. Перетаскивание — вращение, колесо — масштаб.</div>`);
     this.helpBtn = el("button", "btn help-btn", "?");
@@ -62,9 +63,10 @@ var UI = class {
     this.scopeEl = el("div", "scope", '<div class="s-ret"></div>');
     this.nvEl = el("div", "nv-ov");
     this.adsHint = el("div", "ads-hint");
+    this.shotEl = el("div", "shot-info");
     const bottom = el("div", "bottom");
     bottom.append(this.ammo, this.bar, modsToggle, this.helpBtn);
-    root.append(left, this.mods, bottom, this.help, this.toastEl, this.tipEl, this.nvEl, this.scopeEl, this.adsHint);
+    root.append(left, this.mods, bottom, this.help, this.toastEl, this.tipEl, this.nvEl, this.scopeEl, this.adsHint, this.shotEl);
     this.buildBar();
     if (innerWidth > 900) root.classList.add("show-mods");
   }
@@ -96,8 +98,12 @@ var UI = class {
       ads: b("ads", "Прицел", () => a.setADS(!a.st.ads)),
       sight: b("sight", "Сменить прицел", a.cycleSight),
       mag3: b("mag3", "Увеличитель", () => a.toggleMagnifier()),
-      light: b("light", "Фонарь", a.toggleLight),
-      laser: b("laser", "ЛЦУ", a.toggleLaser),
+      reticle: b("reticle", "Сетка", a.cycleReticle),
+      light: b("light", "Фонарь", () => a.toggleLight("main")),
+      light2: b("light2", "Фонарь 2", () => a.toggleLight(1)),
+      laser: b("laser", "ЛЦУ", () => a.toggleLaser("main")),
+      laser2: b("laser2", "ЛЦУ 2", () => a.toggleLaser(1)),
+      trace: b("trace", "Трасса", a.cycleTrace),
       bipod: b("bipod", "Сошки", a.toggleBipod),
       fold: b("fold", "Приклад", a.toggleFold),
       batt: b("batt", "Батареи", a.replaceBatteries),
@@ -241,7 +247,10 @@ var UI = class {
       st.light,
       st.laser,
       a.time,
-      a.battInfo().map((b) => b.pct + (b.on ? "*" : "")).join(","),
+      a.battInfo().map((b) => b.pct + b.time + (b.on ? "*" : "")).join(","),
+      st.trace,
+      a.reticleInfo()?.id,
+      a.reticleInfo()?.color,
       st.bipod,
       st.folded,
       a.audio.muted,
@@ -259,7 +268,8 @@ var UI = class {
     this.ammo.innerHTML = `<div class="a-n">${st.magIn ? n : "—"}${st.chambered ? "<sup>+1</sup>" : ""}<small>/${st.cap}</small></div>
       <div class="a-m"><b>${MODE[st.mode]}</b><span>${st.busy ? a.def.feed === "tube" ? "заряжание…" : "перезарядка…" : !st.magIn ? "нет магазина" : st.spent ? "передёрнуть цевьё" : !st.chambered ? "патронник пуст" : st.holdOpen ? a.def.id === "glock18c" ? "кожух на задержке" : "затвор на задержке" : st.handleLocked ? "рукоять в вырезе" : "готов"}</span></div>`;
     const bi = a.battInfo();
-    if (bi.length) this.ammo.innerHTML += `<div class="a-batt">${bi.map((b) => `<div class="bt${b.on ? " on" : ""}${b.pct <= 15 ? " low" : ""}" title="${b.min} мин на полной мощности"><span>${b.label}</span><i><em style="width:${b.pct}%"></em></i><b>${b.pct}%</b></div>`).join("")}</div>`;
+    // батареи: заряд и обратный отсчёт м:сс (у включённого идёт в реальном времени)
+    if (bi.length) this.ammo.innerHTML += `<div class="a-batt">${bi.map((b) => `<div class="bt${b.on ? " on" : ""}${b.pct <= 15 ? " low" : ""}" title="${esc(b.slot)} · ${b.on ? "осталось" : "хватит на"} ${b.time} (${b.pct}%) · ${esc(b.keys)}"><span>${esc(b.label)}<kbd>${esc(b.keys)}</kbd></span><i><em style="width:${b.pct}%"></em></i><b>${b.time}<small>мин</small></b></div>`).join("")}</div>`;
     const B = this.btn;
     B.mode.textContent = MODE[st.mode];
     B.time.textContent = a.timeLabel();
@@ -271,10 +281,22 @@ var UI = class {
     B.mag3.hidden = !mgPart;
     if (mgPart) B.mag3.textContent = mgPart.info?.sight?.nv ? "ПНВ" : "Увеличитель";
     B.mag3.classList.toggle("on", !st.magAside);
-    B.light.hidden = !a.asm.withInfo("light").length;
-    B.light.classList.toggle("on", st.light);
-    B.laser.hidden = !a.asm.withInfo("laser").length;
-    B.laser.classList.toggle("on", st.laser);
+    const em = a.emitterList();
+    B.light.hidden = !em.lights.length;
+    B.light.textContent = em.lights.length > 1 ? "Фонарь 1" : "Фонарь";
+    B.light.classList.toggle("on", em.lights.length > 1 ? em.lights[0].on : st.light);
+    B.light2.hidden = em.lights.length < 2;
+    B.light2.classList.toggle("on", !!em.lights[1]?.on);
+    B.laser.hidden = !em.lasers.length;
+    B.laser.textContent = em.lasers.length > 1 ? "ЛЦУ 1" : "ЛЦУ";
+    B.laser.classList.toggle("on", em.lasers.length > 1 ? em.lasers[0].on : st.laser);
+    B.laser2.hidden = em.lasers.length < 2;
+    B.laser2.classList.toggle("on", !!em.lasers[1]?.on);
+    const ri = a.reticleInfo();
+    B.reticle.hidden = !ri || ri.n < 2;
+    if (ri) B.reticle.title = "Сетка: " + ri.name + " (G, Shift+G — цвет)";
+    B.trace.textContent = st.trace === "tracer" ? "Трассеры" : st.trace === "off" ? "Трасса выкл" : "След пули";
+    B.trace.classList.toggle("on", st.trace !== "off");
     B.bipod.hidden = !a.asm.withInfo("bipod").length;
     B.bipod.classList.toggle("on", st.bipod);
     B.fold.hidden = !a.asm.withInfo("fold").length;
@@ -284,7 +306,7 @@ var UI = class {
     B.sound.classList.toggle("off", a.audio.muted);
     B.reload.disabled = st.busy;
     const s = a.sights[st.sightIdx];
-    this.adsHint.innerHTML = st.ads && s ? `<b>${esc(s.label)}</b>${s.zoom ? ` · ${st.zoom.toFixed(1)}×` : s.mag > 1 ? ` · ${s.mag}×` : ""}<span>ЛКМ — огонь · ПКМ — выйти${multi ? " · V — другой прицел" : ""}${s.zoom ? " · колесо — кратность" : ""}</span>` : "";
+    this.adsHint.innerHTML = st.ads && s ? `<b>${esc(s.label)}</b>${s.zoom ? ` · ${st.zoom.toFixed(1)}×` : s.mag > 1 ? ` · ${s.mag}×` : ""}${ri ? ` · <i>${esc(ri.name)}</i>` : ""}<span>ЛКМ — огонь · ПКМ — выйти${multi ? " · V — другой прицел" : ""}${ri && ri.n > 1 ? " · G — сетка" : ""}${ri ? " · Shift+G — цвет" : ""}${s.zoom ? " · колесо — кратность" : ""}</span>` : "";
     this.adsHint.classList.toggle("on", !!(st.ads && s));
     this.root.classList.toggle("ads", st.ads);
     if (this.lastStats !== st.stats) {
@@ -298,17 +320,43 @@ var UI = class {
     this.nvOn = on;
     document.body.classList.toggle("nv", on);
   }
-  scope(mag, ads) {
+  // Сетка оптики поверх изображения. Масштаб честный: ppu — пикселей на угловую минуту при текущем
+  // поле зрения камеры. Сетка во второй фокальной плоскости (переменная кратность) откалибрована
+  // на максимальной кратности; увеличитель увеличивает и марку коллиматора.
+  scope(mag, ads, force) {
     const on = !!mag;
-    if (on !== this.scopeOn || mag && mag.s.reticle !== this.scopeKind) {
+    if (force) this.scopeKey = null;
+    if (on !== this.scopeOn) {
       this.scopeOn = on;
       this.scopeEl.classList.toggle("on", on);
-      if (on) {
-        const kind = mag.s.withMag ? this.app.sights[0]?.reticle || "dot" : mag.s.reticle || "dot";
-        this.scopeKind = mag.s.reticle;
-        this.scopeEl.firstChild.innerHTML = reticleSVG(kind, mag.s.withMag ? mag.mag : 1);
-      }
+      this.scopeKey = null;
     }
+    if (!on) return;
+    const ri = this.app.reticleInfo();
+    if (!ri) {
+      if (this.scopeKey !== "none") this.scopeEl.firstChild.innerHTML = "", this.scopeKey = "none";
+      return;
+    }
+    const fov = this.app.S.camera.fov;
+    let ppu = innerHeight / 2 / Math.tan(fov * Math.PI / 360) * Math.tan(Math.PI / 10800);
+    const s = mag.s;
+    if (!s.withMag && s.zoom) ppu *= s.zoom[1] / Math.max(1, mag.mag);
+    const def = RETICLES[ri.id];
+    if (def && !def.mag) ppu *= def.boost || 1;
+    const key = [ri.id, ri.color, ppu.toFixed(3), innerWidth, innerHeight, ri.ctx.key].join("|");
+    if (key === this.scopeKey) return;
+    this.scopeKey = key;
+    this.scopeEl.firstChild.innerHTML = reticleSVG(ri.id, { ppu, color: ri.color, ctx: ri.ctx, W: innerWidth, H: innerHeight });
+  }
+  // Итог последнего выстрела: дальность, время полёта, скорость и энергия у цели
+  shot(h) {
+    if (!h) return;
+    const E = h.E >= 1e3 ? (h.E / 1e3).toFixed(2).replace(".", ",") + " кДж" : Math.round(h.E) + " Дж";
+    const what = h.surf === "steel" ? "попадание в сталь" : "попадание в грунт";
+    this.shotEl.innerHTML = `<b>${what}</b> ${h.dist.toFixed(1).replace(".", ",")} м · полёт ${(h.t * 1e3).toFixed(0)} мс · ${Math.round(h.v)} м/с · ${E}${h.pellets > 1 ? " (на дробину)" : ""}`;
+    this.shotEl.classList.add("on");
+    clearTimeout(this.shotT);
+    this.shotT = setTimeout(() => this.shotEl.classList.remove("on"), 4e3);
   }
   openSlot(id) {
     this.root.classList.add("show-mods");

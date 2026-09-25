@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
-<title>СВД — оружейная</title>
+<title>HK416 / M416 — оружейная</title>
 <style>
 /* Палитра: тёмные непрозрачные панели, светлый текст, янтарный акцент.
    Контраст текста к фону — не ниже 7:1 для основного и 4.5:1 для вторичного. */
@@ -173,7 +173,7 @@ body.nv canvas{filter:grayscale(1) sepia(1) hue-rotate(52deg) saturate(2.6) brig
 </style>
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.166.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.166.1/examples/jsm/"}}</script>
 </head>
-<body data-weapon="svd">
+<body data-weapon="m416">
 <div id="app"></div>
 <div id="boot"><div class="boot-in"><div class="spin"></div><span id="boot-t">Сборка модели…</span></div></div>
 <script type="module">
@@ -2433,11 +2433,9 @@ function makeCtx(mats) {
   };
 }
 
-// src/engine/foley.js
-// Механика, перезарядка, гильзы — синтезированные буферы.
-// Металл здесь — плотный набор неоднородных, быстро гаснущих мод + контактный щелчок:
-// такой спектр слышится как «лязг», а не как нота. Несколько чистых синусоид с долгим
-// затуханием (как было в шаблоне) звучат как «колокольчики» — этого избегаем.
+// src/engine/audio_b/foley.js
+var R = Math.random;
+var jit = (v, k = 0.1) => v * (1 - k + R() * 2 * k);
 function biquad(d, sr, type, f, q = 0.707) {
   const w = 2 * Math.PI * Math.min(f, sr * 0.45) / sr, cw = Math.cos(w), sw = Math.sin(w), a = sw / (2 * q);
   let b0, b1, b2;
@@ -2466,335 +2464,350 @@ function biquad(d, sr, type, f, q = 0.707) {
   }
   return d;
 }
-var R = Math.random;
-var jit = (v, k = 0.08) => v * (1 - k + R() * 2 * k);
+var BODY = {
+  // фрезерованный алюминий ствольной коробки AR/SCAR: плотный, сухой
+  alu: { f0: 380, f1: 9e3, n: 48, tau: 7e-3, tilt: -0.25, decK: 0.75 },
+  // штампованная сталь АК: тонкий лист — ярче и чуть дольше
+  sheet: { f0: 450, f1: 9500, n: 56, tau: 0.011, tilt: -0.15, decK: 0.7 },
+  // массивные стальные детали (затворная рама, защёлка)
+  steel: { f0: 900, f1: 11e3, n: 40, tau: 4e-3, tilt: -0.1, decK: 0.8 },
+  // мелкая пружинная сталь (кнопка, защёлка, фиксатор)
+  small: { f0: 2200, f1: 13e3, n: 30, tau: 22e-4, tilt: 0, decK: 0.85 },
+  // полимерный магазин / накладки — глухо и коротко
+  poly: { f0: 250, f1: 5e3, n: 36, tau: 4e-3, tilt: -0.6, decK: 0.6 },
+  // стальной магазин — корпус из тонкого листа
+  magSteel: { f0: 500, f1: 8e3, n: 44, tau: 6e-3, tilt: -0.3, decK: 0.7 },
+  // латунь патронов в магазине
+  brass: { f0: 2500, f1: 12e3, n: 24, tau: 18e-4, tilt: -0.1, decK: 0.8 },
+  // бетон/земля при падении
+  ground: { f0: 150, f1: 3500, n: 30, tau: 4e-3, tilt: -0.8, decK: 0.5 }
+};
 var Track = class {
   constructor(sr, sec) {
     this.sr = sr;
     this.d = new Float32Array(Math.ceil(sr * sec));
   }
-  // Металл: n мод со случайными частотами в полосе lo…hi (лог-равномерно), верхние гаснут быстрее.
-  // dec — постоянная затухания нижних мод, с; grit — доля полосового шума (шероховатость контакта).
-  metal(t, level, lo, hi, dec, o = {}) {
-    const sr = this.sr, d = this.d, i0 = Math.floor(t * sr);
-    const n = o.n ?? 30, grit = o.grit ?? 0.5;
-    const norm = level * 2.2 / Math.sqrt(n);
-    const att = Math.max(2, sr * 15e-5);
-    for (let m = 0; m < n; m++) {
-      const f = lo * Math.pow(hi / lo, R());
-      const dk = dec * (0.45 + R() * 0.9) * Math.pow(lo / f, o.tilt ?? 0.45);
-      const a = norm * (0.25 + R() * 0.75) * Math.pow(lo / f, 0.2);
-      const w = 2 * Math.PI * f / sr, ph = R() * 6.28;
-      const len = Math.min(d.length - i0, Math.ceil(dk * sr * 6));
-      const k = Math.exp(-1 / (dk * sr));
-      let env = a;
-      for (let i = 0; i < len; i++) {
-        d[i0 + i] += env * Math.min(1, i / att) * Math.sin(w * i + ph);
-        env *= k;
+  // Банк резонаторов, возбуждаемых сигналом x (начиная с отсчёта i0).
+  resonate(x, i0, body, level, damp = 1) {
+    const sr = this.sr, d = this.d, B = BODY[body] || body;
+    const tail = Math.ceil(sr * Math.min(0.12, B.tau * 8 * damp));
+    const n = Math.min(d.length - i0, x.length + tail);
+    if (n <= 0) return;
+    const out = new Float32Array(n);
+    const lf0 = Math.log(B.f0), lf1 = Math.log(B.f1);
+    let norm = 0;
+    for (let m = 0; m < B.n; m++) {
+      const f = Math.exp(lf0 + (lf1 - lf0) * R());
+      const tau = B.tau * damp * Math.pow(f / 1e3, -B.decK) * (0.6 + R() * 0.8);
+      const r = Math.exp(-1 / (Math.max(4e-4, tau) * sr));
+      const w = 2 * Math.PI * f / sr;
+      const c1 = 2 * r * Math.cos(w), c2 = -r * r;
+      const g = (0.25 + R() * 0.75) * Math.pow(f / 1e3, B.tilt) * (1 - r) * 2;
+      norm += g;
+      let y1 = 0, y2 = 0;
+      for (let i = 0; i < n; i++) {
+        const y = (i < x.length ? x[i] : 0) * g + c1 * y1 + c2 * y2;
+        y2 = y1;
+        y1 = y;
+        out[i] += y;
       }
     }
-    if (grit > 0) this.noise(t, level * grit, dec * 0.5, { bp: Math.sqrt(lo * hi), q: 0.9 });
-    if (o.tick !== false) this.tick(t, level * (o.tick ?? 0.6));
+    const k = level / Math.max(1e-6, norm) * 1.6;
+    for (let i = 0; i < n; i++) d[i0 + i] += out[i] * k;
+  }
+  // Удар: контакт длительностью tc (с) + шумовой «треск» контакта + корпус.
+  hit(t, level, body, o = {}) {
+    const sr = this.sr, i0 = Math.floor(t * sr);
+    if (i0 >= this.d.length) return this;
+    const tc = jit(o.tc ?? 2e-4, 0.2);
+    const nc = Math.max(2, Math.round(tc * sr));
+    const nn = Math.round((o.noise ?? 12e-4) * sr);
+    const x = new Float32Array(Math.max(nc, nn) + 2);
+    for (let i = 0; i < nc; i++) x[i] += Math.sin(Math.PI * i / nc) ** 2 * (o.push ?? 1);
+    const na = o.grit ?? 0.35;
+    for (let i = 0; i < nn; i++) x[i] += (R() * 2 - 1) * na * Math.exp(-i / (nn * 0.3 + 1));
+    this.resonate(x, i0, body, level, o.damp ?? 1);
+    if (o.click) {
+      const m = Math.round(15e-4 * sr), b = new Float32Array(m);
+      for (let i = 0; i < m; i++) b[i] = (R() * 2 - 1) * Math.exp(-i / (sr * 25e-5));
+      biquad(b, sr, "hp", o.clickHp ?? 3e3, 0.7);
+      for (let i = 0; i < m && i0 + i < this.d.length; i++) this.d[i0 + i] += b[i] * level * o.click;
+    }
     return this;
   }
-  // Контактный щелчок: доли миллисекунды широкополосного шума.
-  tick(t, level, hp = 1800) {
-    return this.noise(t, level, 25e-5, { hp });
-  }
-  noise(t, level, dec, f = {}) {
-    const sr = this.sr, d = this.d, i0 = Math.floor(t * sr);
-    const n = Math.min(d.length - i0, Math.ceil(dec * sr * 7));
-    if (n <= 0 || !level) return this;
+  // Масса оружия: низкий глухой «тук» (руки гасят его за 20–40 мс).
+  mass(t, level, f = 160, dec = 0.025) {
+    const sr = this.sr, i0 = Math.floor(t * sr), n = Math.min(this.d.length - i0, Math.ceil(sr * dec * 6));
+    if (n <= 0) return this;
     const b = new Float32Array(n);
-    for (let i = 0; i < n; i++) b[i] = (R() * 2 - 1) * Math.exp(-i / (dec * sr));
-    if (f.lp) biquad(b, sr, "lp", f.lp, 0.8);
-    if (f.hp) biquad(b, sr, "hp", f.hp, 0.7);
-    if (f.bp) biquad(b, sr, "bp", f.bp, f.q || 1.5);
-    for (let i = 0; i < n; i++) d[i0 + i] += b[i] * level;
+    for (let i = 0; i < n; i++) b[i] = (R() * 2 - 1) * Math.exp(-i / (sr * dec * 0.35));
+    biquad(b, sr, "lp", jit(f * 2.2), 0.7);
+    biquad(b, sr, "lp", jit(f * 2.2), 0.7);
+    biquad(b, sr, "hp", 45, 0.7);
+    const np = Math.round(sr / f * 0.5);
+    for (let i = 0; i < n; i++) this.d[i0 + i] += level * (b[i] * 2.2 + (i < np ? Math.sin(Math.PI * i / np) * 0.5 : 0));
     return this;
   }
-  // Трение: длительность, полоса f0→f1, плотность зацепов в секунду.
-  scrape(t, dur, level, f0, f1, o = {}) {
+  // Трение: поток микрозацепов через корпус + широкополосное шуршание.
+  scrape(t, dur, level, body, o = {}) {
+    const sr = this.sr, i0 = Math.floor(t * sr), n = Math.min(this.d.length - i0, Math.floor(dur * sr));
+    if (n <= 0) return this;
+    const x = new Float32Array(n), hiss = new Float32Array(n);
+    const rate0 = o.rate ?? 700, rate1 = o.rate1 ?? rate0;
+    const shape2 = o.shape || ((k) => Math.sin(Math.PI * Math.min(1, k * 1.1)) ** 0.6);
+    let next = 0;
+    for (let i = 0; i < n; i++) {
+      const k = i / n, env = shape2(k), rate = rate0 + (rate1 - rate0) * k;
+      if (i >= next) {
+        const a = env * (0.3 + R() * 0.7) * (R() < 0.08 ? 2.2 : 1);
+        const m = Math.max(2, Math.round(sr * jit(o.tc ?? 15e-5, 0.4)));
+        for (let j = 0; j < m && i + j < n; j++) x[i + j] += a * Math.sin(Math.PI * j / m) ** 2;
+        next = i + Math.max(1, Math.round(sr / rate * (0.2 + R() * 1.6)));
+      }
+      hiss[i] = (R() * 2 - 1) * env;
+    }
+    this.resonate(x, i0, body, level * 1.1, o.damp ?? 0.8);
+    biquad(hiss, sr, "bp", o.hissF ?? 3200, 0.6);
+    biquad(hiss, sr, "hp", 900, 0.7);
+    biquad(hiss, sr, "lp", 6500, 0.7);
+    const h = (o.hiss ?? 0.25) * level;
+    for (let i = 0; i < n; i++) this.d[i0 + i] += hiss[i] * h;
+    return this;
+  }
+  // Патроны в магазине: n мелких латунных касаний за dur.
+  rattle(t, dur, level, n = 6) {
+    for (let i = 0; i < n; i++) this.hit(t + R() * dur, level * (0.3 + R() * 0.7), "brass", { tc: 8e-5, noise: 6e-4, grit: 0.5, damp: 0.8 });
+    return this;
+  }
+  // Ладонь по дну магазина: мягкий контакт + шлепок кожи.
+  palm(t, level, body = "poly") {
+    this.hit(t, level * 0.6, body, { tc: 4e-3, noise: 4e-3, grit: 0.25, damp: 0.7 });
+    const sr = this.sr, i0 = Math.floor(t * sr), n = Math.min(this.d.length - i0, Math.round(sr * 0.02));
+    const b = new Float32Array(Math.max(0, n));
+    for (let i = 0; i < n; i++) b[i] = (R() * 2 - 1) * Math.exp(-i / (sr * 3e-3));
+    biquad(b, sr, "bp", jit(1400), 0.8);
+    for (let i = 0; i < n; i++) this.d[i0 + i] += b[i] * level * 0.9;
+    return this.mass(t + 1e-3, level * 0.5, 120, 0.02);
+  }
+  // Ткань и снаряжение: шуршание нейлона (полосовой шум с рваной огибающей) и хруст складок.
+  cloth(t, dur, level, o = {}) {
     const sr = this.sr, i0 = Math.floor(t * sr), n = Math.min(this.d.length - i0, Math.floor(dur * sr));
     if (n <= 0) return this;
     const b = new Float32Array(n);
-    const rate = o.rate ?? 900, rough = o.rough ?? 0.6;
-    let next = 0;
+    let env = 0, target = 0, next = 0;
     for (let i = 0; i < n; i++) {
-      let v = (R() * 2 - 1) * (1 - rough) * 0.35;
       if (i >= next) {
-        v += (R() * 2 - 1) * rough * 2.2;
-        next = i + Math.floor(sr / rate * (0.3 + R() * 1.4));
+        target = R() < 0.25 ? 0.15 : 0.4 + R() * 0.6;
+        next = i + Math.round(sr * (6e-3 + R() * 0.02));
       }
-      b[i] = v;
+      env += (target - env) * 4e-3;
+      const k = i / n, shape2 = Math.sin(Math.PI * Math.min(1, k * 1.05)) ** 0.7;
+      b[i] = (R() * 2 - 1) * env * shape2 * (R() < 3e-3 ? 4 : 1);
     }
-    const seg = 256, out = new Float32Array(n);
-    for (let s = 0; s < n; s += seg) {
-      const f = f0 * Math.pow(f1 / f0, s / n);
-      const from = Math.max(0, s - 64);
-      const part = biquad(b.slice(from, Math.min(n, s + seg)), sr, "bp", f, o.q ?? 1.8);
-      for (let i = s - from; i < part.length; i++) out[from + i] = part[i];
-    }
-    const shape2 = o.shape || ((k) => Math.sin(Math.PI * Math.min(1, k * 1.15)) ** 0.7);
-    for (let i = 0; i < n; i++) this.d[i0 + i] += out[i] * level * 3.2 * shape2(i / n);
+    biquad(b, sr, "bp", o.f ?? 2400, 0.55);
+    biquad(b, sr, "hp", 700, 0.7);
+    for (let i = 0; i < n; i++) this.d[i0 + i] += b[i] * level;
     return this;
-  }
-  // Глухой удар (ладонь, пластик, дерево, земля): шум ниже lp + пара периодов низкой «массы».
-  thud(t, level, lp, dec = 0.03, body = 0) {
-    const sr = this.sr, d = this.d, i0 = Math.floor(t * sr);
-    this.noise(t, level * 1.4, dec, { lp, hp: 50 });
-    if (body) {
-      const w = 2 * Math.PI * jit(body, 0.1) / sr, dk = dec * 0.6;
-      const n = Math.min(d.length - i0, Math.ceil(dk * sr * 5));
-      for (let i = 0; i < n; i++) d[i0 + i] += level * 0.9 * Math.exp(-i / (dk * sr)) * Math.sin(w * i);
-    }
-    return this;
-  }
-  // Сжатие пружины: мягкий шорох с «жужжанием» витков.
-  spring(t, dur, level, f = 2600) {
-    return this.scrape(t, dur, level, f * 0.8, f * 1.3, { rate: 3200, rough: 0.25, q: 3.5, shape: (k) => (1 - k) * Math.min(1, k * 8) });
   }
   buffer(ctx) {
-    const d = this.d;
+    const d = this.d, sr = this.sr;
+    biquad(d, sr, "hp", 40, 0.7);
     let pk = 0;
-    for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i]));
-    const g = pk > 0.98 ? 0.98 / pk : 1;
-    const fade = Math.min(d.length, Math.floor(this.sr * 0.01));
+    for (let i = 0; i < d.length; i++) {
+      d[i] = Math.tanh(d[i] * 1.2) / 1.2;
+      pk = Math.max(pk, Math.abs(d[i]));
+    }
+    const g = pk > 0 ? 0.9 / pk : 1;
+    const fade = Math.min(d.length, Math.floor(sr * 0.01));
     for (let i = 0; i < d.length; i++) d[i] *= g * (i > d.length - fade ? (d.length - i) / fade : 1);
-    const b = ctx.createBuffer(1, d.length, this.sr);
+    const b = ctx.createBuffer(1, d.length, sr);
     b.getChannelData(0).set(d);
     return b;
   }
 };
-// Полосы и затухания типовых деталей: [нижняя, верхняя частота (Гц), затухание (с)].
-var PART = {
-  pin: [3200, 9e3, 18e-4],
-  small: [2200, 7500, 3e-3],
-  bolt: [900, 5200, 45e-4],
-  boltBig: [650, 4200, 6e-3],
-  recv: [420, 3200, 7e-3],
-  stamped: [700, 4800, 5e-3],
-  frame: [500, 2600, 26e-4],
-  magSteel: [900, 4800, 4e-3],
-  magAlu: [700, 3800, 4e-3],
-  magPoly: [420, 1900, 22e-4],
-  tube: [1100, 5600, 5e-3]
-};
-var MT = (T2, t, lvl, part, o) => T2.metal(t, lvl, part[0], part[1], part[2], o);
+var recv = (o) => o.fam === "ak" ? "sheet" : "alu";
+var magB = (o) => o.kind === "steel" ? "magSteel" : "poly";
 var RECIPES = {
-  release(T2) {
-    MT(T2, 0, 0.32, PART.small, { n: 18 });
-    MT(T2, 0.011, 0.14, PART.pin, { n: 12, tick: 0.2 });
-  },
-  // Магазин выходит из шахты.
+  // Сброс магазина. AR/SCAR: кнопка → защёлка отпускает → магазин выскальзывает
+  // под собственным весом (трение о шахту, патроны шевелятся).
+  // АК: нажим на рычаг защёлки, магазин проворачивают вперёд и выводят зацеп.
   magOut(T2, o) {
-    const poly = o.kind === "poly", fam = o.fam;
-    if (fam === "ak" || fam === "svd") {
-      MT(T2, 0, 0.3, PART.small, { n: 16 });
-      T2.scrape(0.02, 0.11, 0.16, 1500, 1000, { rate: 700, rough: 0.7 });
-      MT(T2, 0.12, 0.42, poly ? PART.magPoly : PART.stamped, { tick: 0.5 });
-      T2.scrape(0.14, 0.09, 0.1, 1200, 800, { rate: 500 });
-      T2.thud(0.2, 0.2, 700, 0.02, 160);
-    } else if (fam === "glock") {
-      MT(T2, 0, 0.26, PART.frame, { n: 14, tick: 0.7 });
-      MT(T2, 4e-3, 0.18, PART.small, { n: 12, tick: 0 });
-      T2.scrape(0.012, 0.075, 0.2, 1300, 900, { rate: 900, rough: 0.5 });
-      MT(T2, 0.085, 0.16, PART.magPoly, { n: 14, tick: 0.3 });
+    const fr = o.fill === 0 ? 0 : o.fill === 1 ? 0.7 : 1;
+    const r0 = T2.rattle.bind(T2);
+    T2.rattle = (t, dur, lv, n) => fr ? r0(t, dur, lv * fr, n) : T2.hit(t + dur * 0.5, lv * 0.6, "small", { tc: 2e-4, damp: 1.4 });
+    if (o.fam === "ak") {
+      T2.hit(0, 0.35, "small", { tc: 15e-4, noise: 2e-3, grit: 0.2 });
+      T2.hit(0.03, 0.7, "steel", { tc: 12e-5, click: 0.25 });
+      T2.hit(0.032, 0.45, "sheet", { tc: 2e-4, damp: 0.8 });
+      T2.scrape(0.05, 0.1, 0.35, magB(o), { rate: 500, rate1: 300, tc: 3e-4 });
+      T2.hit(0.15, 0.55, magB(o), { tc: o.kind === "steel" ? 3e-4 : 8e-4 });
+      T2.hit(0.152, 0.3, "sheet", { tc: 3e-4, damp: 0.7 });
+      T2.rattle(0.15, 0.1, 0.12, 5);
     } else {
-      RECIPES.release(T2, o);
-      T2.scrape(0.018, 0.13, poly ? 0.18 : 0.22, poly ? 1400 : 2e3, poly ? 900 : 1300, { rate: poly ? 600 : 1100, rough: 0.55 });
-      MT(T2, 0.14, 0.24, poly ? PART.magPoly : PART.magSteel, { n: 20, tick: 0.3 });
-      T2.thud(0.19, 0.16, 700, 0.02);
+      T2.hit(0, 0.3, "small", { tc: 18e-4, noise: 2e-3, grit: 0.2 });
+      T2.hit(0.012, 0.6, "small", { tc: 1e-4, click: 0.3 });
+      T2.hit(0.013, 0.35, recv(o), { tc: 15e-5, damp: 0.6 });
+      T2.scrape(0.02, 0.12, 0.4, magB(o), { rate: 900, rate1: 500, tc: 18e-5, hiss: 0.3, shape: (k) => (1 - k) ** 0.7 * Math.min(1, k * 8) });
+      T2.rattle(0.03, 0.12, 0.1, 6);
+      T2.hit(0.135, 0.3, magB(o), { tc: 4e-4 });
     }
   },
+  // Магазин входит в шахту: касание раструба, скольжение.
   magInsert(T2, o) {
-    const poly = o.kind === "poly";
-    if (o.fam === "ak" || o.fam === "svd") {
-      MT(T2, 0, 0.38, poly ? PART.magPoly : PART.stamped, { tick: 0.4 });
-      T2.scrape(0.01, 0.07, 0.15, 1500, 2200, { rate: 800 });
+    if (o.fam === "ak") {
+      T2.hit(0, 0.55, magB(o), { tc: o.kind === "steel" ? 25e-5 : 7e-4 });
+      T2.hit(2e-3, 0.35, "sheet", { tc: 2e-4, damp: 0.7 });
+      T2.scrape(0.012, 0.06, 0.28, magB(o), { rate: 600, tc: 2e-4 });
+      T2.rattle(0, 0.05, 0.1, 4);
     } else {
-      T2.scrape(0, 0.1, poly ? 0.2 : 0.24, poly ? 900 : 1300, poly ? 1600 : 2500, { rate: poly ? 700 : 1300, rough: 0.5, shape: (k) => Math.min(1, k * 3) * (1 - k * 0.3) });
+      T2.hit(0, 0.4, magB(o), { tc: o.kind === "steel" ? 3e-4 : 8e-4 });
+      T2.scrape(6e-3, 0.1, 0.42, magB(o), { rate: 600, rate1: 1300, tc: 16e-5, hiss: 0.35, hissF: 2600, shape: (k) => Math.min(1, k * 5) * (1 - 0.4 * k) });
+      T2.rattle(0.01, 0.09, 0.08, 5);
     }
   },
-  // Посадка: удар в упор + щелчок защёлки (+ ладонь по дну).
+  // Посадка: магазин в упор, защёлка заскакивает в окно (+ ладонь по дну у AR/SCAR).
   magIn(T2, o) {
-    const poly = o.kind === "poly", fam = o.fam;
-    if (fam === "ak" || fam === "svd") {
-      T2.scrape(0, 0.05, 0.12, 1200, 1800, { rate: 600 });
-      MT(T2, 0.05, 0.8, PART.recv, { tick: 0.4 });
-      MT(T2, 0.057, 0.45, PART.small, { n: 18 });
-      T2.thud(0.05, 0.3, 500, 0.025, 170);
-    } else if (fam === "glock") {
-      T2.thud(0, 0.7, 900, 0.028, 190);
-      MT(T2, 2e-3, 0.45, PART.frame, { tick: 0.5 });
-      MT(T2, 9e-3, 0.4, PART.small, { n: 16 });
+    if (o.fam === "ak") {
+      T2.scrape(0, 0.045, 0.22, "sheet", { rate: 450, tc: 25e-5, hiss: 0.15 });
+      T2.hit(0.048, 1, "steel", { tc: 1e-4, click: 0.35 });
+      T2.hit(0.048, 0.8, "sheet", { tc: 15e-5 });
+      T2.hit(0.05, 0.45, magB(o), { tc: 3e-4 });
+      T2.mass(0.048, 0.35, 170, 0.02);
+      T2.rattle(0.052, 0.06, 0.1, 4);
     } else {
-      T2.thud(0, 0.5, 900, 0.03, poly ? 210 : 250);
-      MT(T2, 2e-3, 0.55, poly ? PART.magPoly : PART.stamped, { tick: 0.4 });
-      MT(T2, 0.015, 0.45, PART.small, { n: 18 });
+      T2.hit(0, 0.9, recv(o), { tc: 18e-5, click: 0.15 });
+      T2.hit(1e-3, 0.5, magB(o), { tc: 4e-4 });
+      T2.mass(0, 0.45, 150, 0.025);
+      T2.hit(9e-3, 0.75, "small", { tc: 8e-5, click: 0.35 });
+      T2.rattle(4e-3, 0.05, 0.1, 5);
+      T2.palm(0.05, 0.55, magB(o));
+      T2.hit(0.052, 0.3, recv(o), { tc: 3e-4, damp: 0.7 });
     }
   },
-  // Затвор/рукоять назад.
+  // Рукоять назад: хват, отпирание, трение рамы, сжатие пружины, упор.
   chargeBack(T2, o) {
-    const fam = o.fam;
-    if (fam === "mp5") {
-      // рукоять в трубке: хват, отпирание роликов, трение по трубке, сжатие пружины
-      T2.thud(0, 0.12, 1400, 0.01);
-      MT(T2, 6e-3, 0.3, PART.small, { n: 14 });
-      MT(T2, 0.02, 0.36, PART.bolt, { tick: 0.4 });
-      T2.scrape(0.025, 0.15, 0.24, 2200, 3800, { rate: 1500, rough: 0.45, q: 2.6 });
-      T2.spring(0.03, 0.15, 0.06, 3800);
-      MT(T2, 0.18, 0.3, PART.tube, { n: 18 });
-    } else if (fam === "glock") {
-      T2.thud(0, 0.14, 1200, 0.012);
-      MT(T2, 8e-3, 0.3, PART.small, { n: 14 });
-      T2.scrape(0.012, 0.085, 0.22, 1800, 3200, { rate: 1600, rough: 0.5, q: 2.2 });
-      MT(T2, 0.1, 0.34, PART.bolt, { tick: 0.4 });
-    } else {
-      T2.thud(0, 0.14, 1200, 0.012);
-      MT(T2, 4e-3, 0.28, PART.bolt, { n: 18 });
-      T2.scrape(0.01, 0.17, 0.24, 1300, 3200, { rate: fam === "ak" || fam === "svd" ? 700 : 1200, rough: 0.5, q: 2.4 });
-      T2.spring(0.02, 0.16, 0.05, 5200);
-      MT(T2, 0.19, 0.45, fam === "svd" ? PART.boltBig : PART.bolt);
-    }
+    const ak = o.fam === "ak";
+    T2.hit(0, 0.2, "poly", { tc: 3e-3, noise: 3e-3, grit: 0.2 });
+    if (!ak) T2.hit(0.012, 0.45, "small", { tc: 1e-4, click: 0.2 });
+    T2.hit(0.02, 0.55, "steel", { tc: 15e-5 });
+    T2.scrape(0.03, 0.15, 0.5, ak ? "sheet" : "steel", { rate: ak ? 500 : 900, rate1: ak ? 900 : 1500, tc: 16e-5, hiss: 0.3, hissF: 3800 });
+    T2.hit(0.18, 0.6, ak ? "sheet" : recv(o), { tc: 2e-4 });
+    T2.hit(0.181, 0.4, "steel", { tc: 12e-5, damp: 0.7 });
   },
-  // Затвор вперёд: трение, мощный удар запирания, доворот.
+  // Рама вперёд: пружина разгоняет, досылание патрона, мощное запирание.
   chargeRelease(T2, o) {
-    const fam = o.fam;
-    if (fam === "mp5") {
-      // «HK slap»: удар ладонью, рукоять выходит из выреза, затвор с роликами бьёт в казённик
-      T2.thud(0, 0.7, 1100, 0.022, 200);
-      MT(T2, 3e-3, 0.4, PART.small, { n: 16 });
-      T2.scrape(6e-3, 0.04, 0.2, 3800, 2e3, { rate: 1800, rough: 0.5 });
-      MT(T2, 0.046, 1, PART.bolt, { tick: 0.6 });
-      MT(T2, 0.047, 0.5, PART.stamped, { tick: 0 });
-      MT(T2, 0.054, 0.3, PART.small, { n: 14 });
-    } else if (fam === "glock") {
-      T2.scrape(0, 0.03, 0.18, 3200, 1800, { rate: 1800 });
-      MT(T2, 0.032, 0.9, PART.bolt, { tick: 0.6 });
-      MT(T2, 0.033, 0.4, PART.frame, { tick: 0 });
-      MT(T2, 0.04, 0.24, PART.small, { n: 12 });
-    } else {
-      T2.scrape(0, 0.05, 0.2, 3e3, 1600, { rate: 1600, rough: 0.5 });
-      const big = fam === "ak" || fam === "svd" ? 1.12 : 1;
-      MT(T2, 0.05, 0.95 * big, fam === "svd" ? PART.boltBig : PART.bolt, { tick: 0.6 });
-      MT(T2, 0.051, 0.45, PART.recv, { tick: 0 });
-      MT(T2, 0.059, 0.3, PART.small, { n: 14 });
-    }
+    const big = o.fam === "ak" || o.cal === "762x51" ? 1.15 : 1;
+    T2.scrape(0, 0.035, 0.45, "steel", { rate: 1800, tc: 12e-5, hiss: 0.35, hissF: 4500 });
+    T2.scrape(0.02, 0.02, 0.3, "brass", { rate: 1500, tc: 1e-4 });
+    T2.hit(0.042, 1 * big, "steel", { tc: 1e-4, click: 0.3 });
+    T2.hit(0.042, 0.9 * big, recv(o), { tc: 15e-5 });
+    T2.mass(0.042, 0.5 * big, 140, 0.028);
+    T2.hit(0.05, 0.4, "small", { tc: 1e-4, damp: 0.8 });
+    if (o.fam !== "ak") T2.hit(0.075, 0.3, "small", { tc: 1e-4, click: 0.15 });
   },
-  // HK: рукоять уходит вверх в вырез трубки и держит затвор открытым.
-  hkLock(T2) {
-    MT(T2, 0, 0.35, PART.tube, { n: 18 });
-    MT(T2, 9e-3, 0.28, PART.small, { n: 12 });
-  },
-  // Затвор закрывается сам (СВД: магазин вынут при затворе на задержке).
-  boltSlam(T2) {
-    T2.scrape(0, 0.04, 0.16, 2800, 1600, { rate: 1500 });
-    MT(T2, 0.042, 0.9, PART.boltBig, { tick: 0.6 });
-    MT(T2, 0.043, 0.45, PART.recv, { tick: 0 });
-  },
-  // Затворная задержка: нажатие рычага, затем удар затвора/кожуха.
+  // Затворная задержка: ладонь по кнопке, рама вперёд.
   boltCatch(T2, o) {
-    const g = o.fam === "glock";
-    MT(T2, 0, 0.28, g ? PART.frame : PART.small, { n: 14 });
-    MT(T2, 0.03, 0.95, PART.bolt, { tick: 0.6 });
-    MT(T2, 0.031, 0.4, g ? PART.frame : PART.recv, { tick: 0 });
-    MT(T2, 0.038, 0.26, PART.small, { n: 12 });
+    T2.hit(0, 0.35, "small", { tc: 15e-4, noise: 2e-3 });
+    T2.hit(0.01, 0.45, "small", { tc: 1e-4, click: 0.2 });
+    T2.scrape(0.012, 0.03, 0.4, "steel", { rate: 1800, tc: 12e-5, hiss: 0.3, hissF: 4500 });
+    T2.hit(0.043, 1, "steel", { tc: 1e-4, click: 0.3 });
+    T2.hit(0.043, 0.85, recv(o), { tc: 15e-5 });
+    T2.mass(0.043, 0.45, 140, 0.028);
   },
-  // Помпа назад: хват цевья, отпирание, трение планок по трубке, выброс гильзы, упор.
-  pumpBack(T2) {
-    T2.thud(0, 0.3, 900, 0.018, 150);
-    MT(T2, 0.01, 0.55, PART.bolt, { tick: 0.5 });
-    T2.scrape(0.018, 0.1, 0.3, 900, 1700, { rate: 700, rough: 0.6, q: 1.6 });
-    T2.scrape(0.02, 0.1, 0.12, 3200, 4600, { rate: 2200, rough: 0.35, q: 3 });
-    MT(T2, 0.07, 0.25, PART.small, { n: 12 });
-    MT(T2, 0.125, 0.7, PART.recv, { tick: 0.5 });
-    MT(T2, 0.127, 0.3, PART.bolt, { tick: 0 });
-  },
-  // Помпа вперёд: подача патрона, подъём лотка, запирание — «чк-чак».
-  pumpForward(T2) {
-    T2.scrape(0, 0.09, 0.26, 1500, 900, { rate: 700, rough: 0.6, q: 1.6 });
-    MT(T2, 0.03, 0.3, PART.small, { n: 14 });
-    MT(T2, 0.09, 0.95, PART.bolt, { tick: 0.6 });
-    MT(T2, 0.091, 0.45, PART.recv, { tick: 0 });
-    MT(T2, 0.1, 0.35, PART.small, { n: 12 });
-    T2.thud(0.09, 0.3, 600, 0.02, 130);
-  },
-  // Патрон в подствольный магазин: гильза мимо лотка, отсечка, упор большим пальцем.
-  shellLoad(T2) {
-    T2.thud(0, 0.2, 1400, 0.012);
-    T2.scrape(4e-3, 0.08, 0.2, 1100, 2200, { rate: 900, rough: 0.55 });
-    MT(T2, 0.03, 0.22, PART.small, { n: 12 });
-    T2.scrape(0.05, 0.05, 0.12, 900, 700, { rate: 600 });
-    MT(T2, 0.1, 0.38, PART.tube, { n: 16, tick: 0.5 });
-    T2.thud(0.1, 0.28, 700, 0.02, 180);
-  },
+  // Магазин падает на бетон и подпрыгивает.
+  // Магазин о бетонный пол. Полный — тяжёлый глухой удар и почти без отскока;
+  // пустой — лёгкий, звонкий, скачет и дребезжит пружиной с подавателем.
   magGround(T2, o) {
-    const poly = o.kind === "poly";
-    T2.thud(0, 0.7, 700, 0.03, 140);
-    MT(T2, 4e-3, 0.35, poly ? PART.magPoly : PART.magSteel, { tick: 0.4 });
-    T2.thud(0.11 + R() * 0.04, 0.25, 600, 0.02, 160);
-    if (!poly) MT(T2, 0.12, 0.16, PART.magSteel, { n: 16 });
-  },
-  // Гильза о бетон: латунь звенит заметно дольше стали; пластиковая гильза дроби — глухо.
-  casing(T2, o) {
-    if (o.kind === "hull") {
-      T2.thud(0, 0.4, 1600, 0.012, 320);
-      T2.metal(2e-3, 0.22, 2400, 7e3, 5e-3, { n: 16, tick: 0.3 });
-      T2.thud(0.07 + R() * 0.03, 0.15, 1400, 0.01, 300);
-      return;
+    const steel = o.kind === "steel";
+    const full = o.fill === 2, empty = o.fill === 0;
+    const ground = { ...BODY.ground, f0: 220, f1: 5200, tau: 5e-3 };
+    T2.hit(0, full ? 1 : 0.75, ground, { tc: full ? 9e-4 : 5e-4 });
+    T2.hit(1e-3, full ? 0.7 : 0.85, magB(o), { tc: steel ? 15e-5 : 5e-4, click: steel ? 0.25 : 0.06 });
+    T2.mass(0, full ? 0.6 : 0.25, full ? 95 : 140, 0.02);
+    if (!empty) T2.rattle(2e-3, 0.08, full ? 0.28 : 0.2, full ? 10 : 6);
+    else {
+      T2.hit(4e-3, 0.3, "small", { tc: 2e-4 });
+      T2.hit(0.03, 0.2, "small", { tc: 2e-4 });
     }
-    const steel = o.kind === "steel", k = o.cal === "762x54R" ? 0.75 : o.cal === "9x19" ? 1.25 : 1;
-    const lo = (steel ? 2600 : 3600) * k, hi = steel ? 9e3 : 12e3, dec = steel ? 7e-3 : 0.016;
-    const oo = { tick: 0.5, grit: 0.2, tilt: 0.3 };
-    T2.metal(0, 0.5, lo, hi, dec, { n: 26, ...oo });
-    T2.metal(0.06 + R() * 0.04, 0.24, lo, hi, dec, { n: 20, ...oo, tick: 0.3 });
-    T2.metal(0.13 + R() * 0.06, 0.1, lo, hi, dec, { n: 14, ...oo, tick: 0.2 });
-  },
-  // Цикл автоматики при выстреле (тайминг — от темпа стрельбы).
-  cycle(T2, o) {
-    const cyc = 60 / (o.rpm || 700), fam = o.fam;
-    if (fam === "m870") return;
-    if (fam === "glock") {
-      MT(T2, 0.25 * cyc, 0.5, PART.frame, { tick: 0.4 });
-      MT(T2, 0.8 * cyc, 0.55, PART.bolt, { tick: 0.4 });
-      return;
+    let t = 0.08 + R() * 0.04, a = full ? 0.25 : 0.55;
+    for (let i = 0; i < (full ? 1 : 3); i++) {
+      T2.hit(t, a, magB(o), { tc: steel ? 2e-4 : 6e-4 });
+      T2.hit(t, a * 0.8, ground, { tc: 6e-4 });
+      if (empty) T2.hit(t + 3e-3, a * 0.4, "small", { tc: 2e-4 });
+      t += (0.07 + R() * 0.05) * (1 - i * 0.3);
+      a *= 0.5;
     }
-    if (fam === "mp5") MT(T2, 3e-3, 0.3, PART.small, { n: 12 });
-    MT(T2, 0.42 * cyc, fam === "svd" ? 0.55 : 0.45, fam === "mp5" ? PART.stamped : PART.recv, { tick: 0.3 });
-    MT(T2, 0.86 * cyc, 0.7, fam === "svd" ? PART.boltBig : PART.bolt, { tick: 0.5 });
-    MT(T2, 0.86 * cyc + 1e-3, 0.3, PART.recv, { tick: 0 });
   },
+  // Магазин из подсумка: рука, шуршание нейлона, магазин выходит из кармана, патроны.
+  pouch(T2, o) {
+    T2.cloth(0, 0.34, 0.5, { f: 2100 });
+    T2.hit(0.05, 0.25, "poly", { tc: 3e-3, noise: 4e-3, grit: 0.3 });
+    T2.scrape(0.12, 0.16, 0.3, magB(o), { rate: 400, rate1: 250, tc: 4e-4, hiss: 0.45, hissF: 1800 });
+    T2.rattle(0.15, 0.16, 0.12, 6);
+    T2.hit(0.29, 0.2, magB(o), { tc: 6e-4 });
+    T2.cloth(0.3, 0.12, 0.25, { f: 2800 });
+  },
+  // Проверка посадки: рывок магазина вниз — стук в защёлку.
+  tug(T2, o) {
+    T2.hit(0, 0.35, magB(o), { tc: 4e-4 });
+    T2.hit(2e-3, 0.25, "small", { tc: 15e-5 });
+    T2.rattle(3e-3, 0.03, 0.06, 3);
+  },
+  // Вскидка: ткань, приклад в плечо (глухой удар в плечевую накладку).
+  shoulder(T2) {
+    T2.cloth(0, 0.16, 0.35, { f: 2e3 });
+    T2.hit(0.11, 0.3, "poly", { tc: 4e-3, noise: 4e-3, grit: 0.2, damp: 0.6 });
+    T2.mass(0.11, 0.2, 90, 0.03);
+  },
+  // Опускание оружия.
+  unshoulder(T2) {
+    T2.cloth(0, 0.14, 0.25, { f: 2300 });
+  },
+  // Спуск без выстрела: удар курка по ударнику.
   dryFire(T2, o) {
-    if (o.fam === "glock") {
-      MT(T2, 0, 0.35, PART.small, { n: 14 });
-      MT(T2, 2e-3, 0.2, PART.frame, { tick: 0 });
-      return;
-    }
-    MT(T2, 0, 0.55, PART.bolt, { tick: 0.5 });
-    MT(T2, 3e-3, 0.22, PART.small, { n: 12 });
+    T2.hit(0, 0.25, "small", { tc: 1e-4 });
+    T2.hit(6e-3, 0.8, "steel", { tc: 1e-4, click: 0.25 });
+    T2.hit(6e-3, 0.45, recv(o), { tc: 2e-4, damp: 0.7 });
   },
-  // Переводчик / предохранитель: пружинный фиксатор.
+  // Переводчик: подпружиненный фиксатор перескакивает в лунку.
   selector(T2, o) {
-    const fam = o.fam;
-    if (fam === "m870") {
-      MT(T2, 0, 0.35, PART.small, { n: 14 });
-      return;
-    }
-    if (fam === "glock") {
-      MT(T2, 0, 0.3, PART.small, { n: 12 });
-      MT(T2, 0.02, 0.2, PART.pin, { n: 10, tick: 0.2 });
-      return;
-    }
-    const big = fam === "svd" || fam === "ak";
-    T2.scrape(0, 0.035, 0.07, 2500, 3500, { rate: 1500 });
-    MT(T2, 0.03, big ? 0.5 : 0.38, big ? PART.stamped : PART.small, { n: 18 });
+    T2.scrape(0, 0.03, 0.18, "small", { rate: 1500, tc: 1e-4, hiss: 0.1 });
+    T2.hit(0.03, 0.6, "small", { tc: 1e-4, click: 0.25 });
+    T2.hit(0.031, 0.3, recv(o), { tc: 2e-4, damp: 0.6 });
   },
   click(T2) {
-    MT(T2, 0, 0.26, PART.pin, { n: 12, tick: 0.4 });
+    T2.hit(0, 0.5, "small", { tc: 1e-4, click: 0.2 });
+  },
+  // Короткий удар металла общего назначения (детали на планке, сошки, приклад).
+  tick(T2, o) {
+    T2.hit(0, 0.6, o.kind === "poly" ? "poly" : "steel", { tc: o.kind === "poly" ? 6e-4 : 12e-5, click: 0.15 });
+  },
+  // Механика при выстреле: отпирание, удар рамы в буфер, накат и запирание.
+  cycle(T2, o) {
+    const cyc = 60 / (o.rpm || 700);
+    T2.hit(1e-3, 0.45, "steel", { tc: 1e-4 });
+    T2.scrape(4e-3, cyc * 0.35, 0.25, "steel", { rate: 2e3, tc: 1e-4, hiss: 0.2, hissF: 4500 });
+    T2.hit(cyc * 0.45, 0.4, recv(o), { tc: 2e-4 });
+    T2.hit(cyc * 0.85, 0.7, "steel", { tc: 1e-4, click: 0.15 });
+    T2.hit(cyc * 0.85, 0.5, recv(o), { tc: 15e-5 });
+  },
+  // Литиевые элементы CR123A: стальной корпус, щёлкают друг о друга и о трубку фонаря.
+  battCells(T2) {
+    const cell = { ...BODY.small, f0: 1500, f1: 9e3, tau: 4e-3, n: 26 };
+    T2.scrape(0, 0.08, 0.15, "alu", { rate: 700, tc: 2e-4, hiss: 0.15 });
+    T2.hit(0.07, 0.5, cell, { tc: 15e-5, click: 0.1 });
+    T2.hit(0.1 + R() * 0.02, 0.35, cell, { tc: 15e-5 });
+    T2.hit(0.2, 0.25, "poly", { tc: 2e-3, noise: 3e-3 });
+  },
+  // Гильза о бетон: тонкостенная латунная (стальная) трубка звенит коротко.
+  casing(T2, o) {
+    const body = o.kind === "steel" ? { ...BODY.magSteel, f0: 1800, f1: 9e3, tau: 0.02, n: 30 } : { ...BODY.brass, f0: 2600, f1: 11e3, tau: 0.03, n: 26, decK: 0.5 };
+    T2.hit(0, 0.6, body, { tc: 8e-5, noise: 8e-4 });
+    T2.hit(0.06 + R() * 0.05, 0.3, body, { tc: 1e-4 });
+    T2.hit(0.15 + R() * 0.08, 0.15, body, { tc: 1e-4 });
   }
 };
-var LEN = { release: 0.05, magOut: 0.34, magInsert: 0.14, magIn: 0.16, chargeBack: 0.26, chargeRelease: 0.16, hkLock: 0.08, boltSlam: 0.14, boltCatch: 0.14, pumpBack: 0.2, pumpForward: 0.18, shellLoad: 0.18, magGround: 0.26, casing: 0.3, dryFire: 0.06, selector: 0.07, click: 0.04 };
+var LEN = { pouch: 0.48, tug: 0.08, shoulder: 0.22, unshoulder: 0.16, battCells: 0.3, magOut: 0.3, magInsert: 0.16, magIn: 0.16, chargeBack: 0.26, chargeRelease: 0.16, boltCatch: 0.14, magGround: 0.5, dryFire: 0.08, selector: 0.08, click: 0.05, tick: 0.06, cycle: 0.14, casing: 0.36 };
 var VARIANTS = 3;
 var Foley = class {
   constructor(ctx) {
@@ -2802,13 +2815,12 @@ var Foley = class {
     this.cache = /* @__PURE__ */ new Map();
   }
   buffer(name, o = {}) {
-    const key = [name, o.fam, o.kind, o.cal, o.rpm].join("|");
+    const key = name + "|" + (o.fam || "") + "|" + (o.kind || "") + "|" + (o.cal || "") + "|" + (o.rpm || "") + "|" + (o.fill ?? "");
     let list = this.cache.get(key);
     if (!list) {
       list = [];
-      const len = name === "cycle" ? 60 / (o.rpm || 700) + 0.06 : LEN[name] || 0.2;
       for (let v = 0; v < VARIANTS; v++) {
-        const T2 = new Track(this.ctx.sampleRate, len);
+        const T2 = new Track(this.ctx.sampleRate, LEN[name] || 0.2);
         RECIPES[name](T2, o);
         list.push(T2.buffer(this.ctx));
       }
@@ -2817,263 +2829,22 @@ var Foley = class {
     return list[Math.random() * list.length | 0];
   }
 };
+var FOLEY_NAMES = Object.keys(RECIPES);
 
-// src/engine/gunshot.js
-// Выстрел рендерится заранее в буфер (стерео, 3 варианта на конфигурацию) — так можно
-// позволить себе нормальную физику вместо пары фильтров на шуме:
-//   дульная волна — импульс Фридлендера (положительная фаза T+ растёт с зарядом и калибром),
-//   турбулентный выхлоп газов — шум с падающим срезом, «масса» — низкий удар, который ощущается телом,
-//   N-волна сверхзвуковой пули (у СВД — хлёсткий щелчок раньше хлопка), отражение от земли (≈7 мс),
-//   механика цикла своего семейства (кожух Glock, роликовый затвор MP5, газовый поршень СВД),
-//   эхо стрельбища: боковые валы, вал за мишенями, лесополоса; для крупных калибров — раскатистый хвост.
-// Глушитель: волна почти срезана и сдвинута вниз, «пфф» из торца, выхлоп из окна, механика слышна;
-// сверхзвуковая пуля СВД щёлкает и с глушителем.
-var SHOT = {
-  // T — положительная фаза волны (с); peak — уровень; thumpF/thumpT — низ; gas — длит. выхлопа (с), gasF — срез
-  glock: { T: 32e-5, peak: 0.95, thumpF: 150, thumpT: 0.022, thump: 0.55, gas: 0.016, gasF: 9500, gasLo: 1700, crack: 0, tail: 0.95, echo: 0.8, drive: 2.4, room: 0.9, bright: 1.25 },
-  mp5: { T: 42e-5, peak: 0.9, thumpF: 118, thumpT: 0.03, thump: 0.62, gas: 0.022, gasF: 8200, gasLo: 1400, crack: 0.12, tail: 1.15, echo: 0.9, drive: 2.2, room: 1, bright: 1.05 },
-  svd: { T: 95e-5, peak: 1.15, thumpF: 74, thumpT: 0.06, thump: 1, gas: 0.05, gasF: 6200, gasLo: 800, crack: 1, tail: 2.4, echo: 1.35, drive: 2.8, room: 1.3, bright: 0.95 },
-  m870: { T: 16e-4, peak: 1.25, thumpF: 52, thumpT: 0.1, thump: 1.35, gas: 0.075, gasF: 3600, gasLo: 420, crack: 0, tail: 2.7, echo: 1.45, drive: 3.2, room: 1.4, bright: 0.7 },
-  ak: { T: 7e-4, peak: 1.05, thumpF: 95, thumpT: 0.045, thump: 0.85, gas: 0.04, gasF: 6800, gasLo: 900, crack: 0.8, tail: 1.9, echo: 1.2, drive: 2.6, room: 1.2, bright: 1 }
-};
-var MUZ2 = {
-  bare: { blast: 1, gas: 1, lp: 1, thump: 1, echo: 1, harsh: 0 },
-  fh: { blast: 0.95, gas: 0.8, lp: 0.92, thump: 1, echo: 1, harsh: 0 },
-  choke: { blast: 1.02, gas: 1, lp: 1, thump: 1, echo: 1, harsh: 0 },
-  comp: { blast: 1.2, gas: 1.25, lp: 1.15, thump: 1.05, echo: 1.15, harsh: 0.35 },
-  brake: { blast: 1.4, gas: 1.5, lp: 1.2, thump: 1.1, echo: 1.3, harsh: 0.6 },
-  linear: { blast: 0.7, gas: 0.6, lp: 0.7, thump: 0.95, echo: 0.85, harsh: 0 },
-  supp: { blast: 0.09, gas: 0.12, lp: 0.16, thump: 0.3, echo: 0.22, harsh: 0 }
-};
-function seeded(seed) {
-  let s = seed >>> 0 || 1;
-  return () => (s = s * 1664525 + 1013904223 >>> 0) / 4294967296;
-}
-function hashStr(str) {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
-  return h >>> 0;
-}
-// одно-полюсный ФНЧ по месту
-function lp1(d, sr, f, i0 = 0, i1 = d.length) {
-  const a = 1 - Math.exp(-2 * Math.PI * f / sr);
-  let y = 0;
-  for (let i = i0; i < i1; i++) d[i] = y += (d[i] - y) * a;
-  return d;
-}
-function renderGunshot(sr, fam, muzzle, cal, variant) {
-  const P = SHOT[fam] || SHOT.ak, M = MUZ2[muzzle] || MUZ2.bare;
-  const supp = muzzle === "supp";
-  const len = supp ? Math.max(0.9, P.tail * 0.45) : P.tail + 0.35;
-  const n = Math.ceil(sr * len);
-  const L = new Float32Array(n), Rt = new Float32Array(n);
-  const rnd = Math.random;
-  const v = 0.93 + rnd() * 0.14;
-  const t0 = Math.floor(sr * 3e-3);
-  // --- ядро (моно): волна + выхлоп + низ -----------------------------------
-  const coreN = Math.ceil(sr * 0.25);
-  const core = new Float32Array(coreN);
-  // импульс Фридлендера: p(t) = (1 - t/T)·e^(-b·t/T); у глушителя фаза длиннее и мягче
-  const T = P.T * (supp ? 3.2 : 1) * (0.95 + rnd() * 0.1), b = 1.7;
-  const blastA = P.peak * M.blast * v;
-  for (let i = 0; i < coreN; i++) {
-    const t = i / sr;
-    if (t > T * 6) break;
-    core[i] += blastA * (1 - t / T) * Math.exp(-b * t / T);
-  }
-  // турбулентный выхлоп: белый шум, срез падает от gasF к gasLo, огибающая ~ быстрый спад
-  {
-    const g = new Float32Array(coreN);
-    const dur = P.gas * (supp ? 0.7 : 1);
-    for (let i = 0; i < coreN; i++) {
-      const t = i / sr;
-      g[i] = (rnd() * 2 - 1) * Math.exp(-t / dur) * (1 - Math.exp(-t / 4e-4));
-    }
-    // ФНЧ с падающей частотой — кусками по 64 отсчёта
-    let y1 = 0, y2 = 0;
-    for (let i = 0; i < coreN; i++) {
-      const t = i / sr;
-      const f = P.gasLo * M.lp + (P.gasF * M.lp - P.gasLo * M.lp) * Math.exp(-t / (dur * 0.8));
-      const a = 1 - Math.exp(-2 * Math.PI * Math.min(f, sr * 0.45) / sr);
-      y1 += (g[i] - y1) * a;
-      y2 += (y1 - y2) * a;
-      core[i] += y2 * 0.9 * M.gas * v * (supp ? 1.6 : 1);
-    }
-  }
-  // «масса»: полтора периода низкой частоты с быстрым спадом и уходом частоты вниз
-  {
-    const f0 = P.thumpF * (0.95 + rnd() * 0.1);
-    let ph = 0;
-    for (let i = 0; i < coreN; i++) {
-      const t = i / sr;
-      if (t > P.thumpT * 6) break;
-      const f = f0 * (0.55 + 0.45 * Math.exp(-t / (P.thumpT * 0.7)));
-      ph += 2 * Math.PI * f / sr;
-      core[i] += Math.sin(ph) * P.thump * M.thump * v * Math.exp(-t / P.thumpT) * (1 - Math.exp(-t / 6e-4)) * 0.8;
-    }
-  }
-  // резкость дульных тормозов/компенсаторов: полоса 2–3 кГц
-  if (M.harsh > 0) {
-    const h = new Float32Array(coreN);
-    for (let i = 0; i < coreN; i++) h[i] = (rnd() * 2 - 1) * Math.exp(-i / sr / 0.03);
-    biquad(h, sr, "bp", 2600, 1.1);
-    for (let i = 0; i < coreN; i++) core[i] += h[i] * M.harsh * 1.4;
-  }
-  // глушитель: «пфф» из торца (узкая полоса ~900 Гц) + выхлоп из окна (3–6 кГц, чуть позже)
-  if (supp) {
-    const pf = new Float32Array(coreN), port = new Float32Array(coreN);
-    const pd = fam === "m870" || fam === "svd" ? 0.035 : 0.02;
-    for (let i = 0; i < coreN; i++) {
-      const t = i / sr;
-      pf[i] = (rnd() * 2 - 1) * Math.exp(-t / pd) * (1 - Math.exp(-t / 1.5e-3));
-      const tp = t - (fam === "glock" ? 4e-3 : 7e-3);
-      port[i] = tp > 0 ? (rnd() * 2 - 1) * Math.exp(-tp / 0.012) : 0;
-    }
-    biquad(pf, sr, "bp", fam === "m870" ? 520 : fam === "svd" ? 700 : 950, 1.3);
-    biquad(port, sr, "bp", 4200, 1.2);
-    const first = variant === 0 ? 1.8 : 1;
-    for (let i = 0; i < coreN; i++) core[i] += pf[i] * 1.5 * v * first + port[i] * (fam === "svd" ? 0.35 : 0.22);
-  }
-  // яркость: подъём верхов у пистолета (короткий ствол «хлещет»), завал у ружья
-  {
-    const hp = core.slice();
-    biquad(hp, sr, "hp", 2500, 0.7);
-    for (let i = 0; i < coreN; i++) core[i] += hp[i] * (P.bright - 1) * 1.2;
-  }
-  // насыщение: без него выстрел звучит как «хлопушка» — любой реальный записанный выстрел перегружен
-  {
-    const dr = P.drive * (supp ? 0.55 : 1);
-    const nrm = Math.tanh(dr);
-    for (let i = 0; i < coreN; i++) core[i] = Math.tanh(core[i] * dr) / nrm;
-  }
-  // --- сборка: прямой звук + отражение от земли/площадки ---------------------
-  const put = (src, at, g, gl = 1, gr = 1) => {
-    const i0 = Math.floor(at * sr);
-    for (let i = 0; i < src.length && i0 + i < n; i++) {
-      L[i0 + i] += src[i] * g * gl;
-      Rt[i0 + i] += src[i] * g * gr;
-    }
-  };
-  put(core, t0 / sr, 1, 1, 0.94);
-  {
-    const gnd = core.slice();
-    lp1(gnd, sr, 3200);
-    put(gnd, t0 / sr + 72e-4, 0.42, 0.95, 1);
-  }
-  // N-волна пули: перед хлопком (пуля обгоняет звук), двуполярный импульс ~0,5 мс
-  if (P.crack > 0) {
-    const cn = Math.ceil(sr * 25e-4), cr = new Float32Array(cn);
-    const w = Math.floor(sr * 5e-4);
-    for (let i = 0; i < cn; i++) cr[i] = i < w ? 1 - 2 * i / w : i < w + 3 ? -1 + (i - w) / 3 : 0;
-    const ringN = Math.ceil(sr * 0.02), ring = new Float32Array(ringN);
-    for (let i = 0; i < ringN; i++) ring[i] = (rnd() * 2 - 1) * Math.exp(-i / sr / 3e-3);
-    biquad(ring, sr, "hp", 3500, 0.7);
-    const ca = P.crack * (supp ? 0.85 : 0.75) * v;
-    put(cr, (t0 - Math.floor(sr * 6e-4)) / sr, ca, 1, 0.9);
-    put(ring, t0 / sr, ca * 0.25, 0.8, 1);
-  }
-  // --- механика цикла: моды фиксированы для семейства (seeded), это «голос» оружия ---------
-  if (fam !== "m870") {
-    const Tm = new Track(sr, 0.2);
-    const saveR = R;
-    R = seeded(hashStr("mech|" + fam));
-    const cyc = fam === "glock" ? 0.05 : fam === "mp5" ? 0.075 : fam === "svd" ? 0.12 : 0.085;
-    if (fam === "glock") {
-      Tm.metal(0.2 * cyc, 0.42, 1800, 7200, 3e-3, { n: 20, tick: 0.5 });
-      Tm.thud(0.2 * cyc, 0.25, 1100, 0.01, 260);
-      Tm.metal(0.78 * cyc, 0.5, 1300, 6200, 4e-3, { n: 22, tick: 0.6 });
-    } else if (fam === "mp5") {
-      Tm.metal(0.25 * cyc, 0.35, 900, 5200, 5e-3, { n: 22, tick: 0.4 });
-      Tm.metal(0.82 * cyc, 0.6, 700, 4600, 6e-3, { n: 26, tick: 0.6 });
-      Tm.spring(0.3 * cyc, 0.05, 0.06, 2400);
-    } else {
-      Tm.noise(0.08 * cyc, 0.25, 0.01, { bp: 2200, q: 1.2 });
-      Tm.metal(0.35 * cyc, 0.45, 600, 4200, 7e-3, { n: 26, tick: 0.4 });
-      Tm.metal(0.88 * cyc, 0.75, 480, 3600, 9e-3, { n: 30, tick: 0.6 });
-      Tm.thud(0.88 * cyc, 0.3, 500, 0.02, 120);
-    }
-    R = saveR;
-    const mg = (supp ? 0.55 : 0.28) * (fam === "svd" ? 1.2 : 1);
-    put(Tm.d, t0 / sr + 2e-3, mg, 0.85, 1);
-  }
-  // --- окружение ------------------------------------------------------------
-  // раннее: скамья/площадка стрелка (плотные короткие отражения 3–25 мс)
-  const echoSrc = core.slice(0, Math.ceil(sr * 0.09));
-  lp1(echoSrc, sr, 2400);
-  for (let i = 0, m = echoSrc.length, f = Math.floor(sr * 0.05); i < f; i++) echoSrc[m - 1 - i] *= 0.5 - 0.5 * Math.cos(Math.PI * i / f);
-  const E = M.echo * P.echo * (supp ? 1.4 : 1);
-  for (let i = 0; i < 6; i++) put(echoSrc, t0 / sr + 0.003 + rnd() * 0.022, 0.035 * P.room * E, 0.5 + rnd() * 0.5, 0.5 + rnd() * 0.5);
-  // дальние: боковые валы (42 м), вал за мишенями (~128 м), лесополоса (150–190 м)
-  const refl = [[0.245, 0.2, 1500, 1, 0.55], [0.262, 0.16, 1400, 0.5, 1], [0.75, 0.22, 900, 0.8, 0.8], [0.9, 0.1, 700, 1, 0.6], [1.04, 0.09, 600, 0.6, 1], [1.21, 0.05, 500, 0.9, 0.8]];
-  for (const [dt, g, f, gl, gr] of refl) {
-    if (dt > len - 0.2) continue;
-    const e = echoSrc.slice();
-    lp1(e, sr, f);
-    lp1(e, sr, f * 1.5);
-    // размазывание: несколько копий с разбросом — отражение от неровного вала, а не от стены
-    for (let k = 0; k < 4; k++) put(e, t0 / sr + dt + rnd() * 0.035, g * E * (0.14 + rnd() * 0.1), gl, gr);
-  }
-  // диффузный хвост: шум по трём полосам, верха гаснут быстрее (поглощение воздухом)
-  {
-    const tl = P.tail * (supp ? 0.35 : 1);
-    const bands = [[260, tl * 0.5, 0.9], [1100, tl * 0.32, 0.55], [3800, tl * 0.14, 0.3]];
-    for (const ch of [L, Rt]) {
-      for (const [f, T60, a] of bands) {
-        const tn = Math.min(n, Math.ceil(sr * T60 * 1.6));
-        const d = new Float32Array(tn);
-        for (let i = 0; i < tn; i++) {
-          const t = i / sr;
-          d[i] = (rnd() * 2 - 1) * Math.exp(-6.9 * t / T60) * Math.min(1, t / 0.035);
-        }
-        biquad(d, sr, "bp", f, 0.8);
-        // раскаты у крупных калибров: медленная модуляция низкой полосы
-        if (f < 400 && P.tail > 2) for (let i = 0; i < tn; i++) d[i] *= 0.6 + 0.4 * Math.sin(i / sr * 7.3 + 1.3) * Math.sin(i / sr * 2.1);
-        const g = a * 0.22 * E * P.peak;
-        const i0 = t0 + Math.floor(sr * 0.012);
-        for (let i = 0; i < tn && i0 + i < n; i++) ch[i0 + i] += d[i] * g;
-      }
-    }
-  }
-  // нормировка по пику + мягкий срез конца
-  let pk = 0;
-  for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(L[i]), Math.abs(Rt[i]));
-  const gN = 0.97 / Math.max(1e-6, pk);
-  const fade = Math.floor(sr * 0.08);
-  for (let i = 0; i < n; i++) {
-    const f = i > n - fade ? (n - i) / fade : 1;
-    L[i] *= gN * f;
-    Rt[i] *= gN * f;
-  }
-  return [L, Rt];
-}
-// Громкость на выходе (после нормировки буферов) — соотношение калибров как у стрелка.
-var SHOT_LEVEL = { glock: 0.8, mp5: 0.84, svd: 1, m870: 1, ak: 0.95 };
-var SUPP_LEVEL = { glock: 0.32, mp5: 0.3, svd: 0.62, m870: 0.42, ak: 0.45 };
-
-// src/engine/audio.js
-// Выстрел: дульная волна (полосовой шум с падающим срезом), удар давления (низкий импульс),
-// N-волна сверхзвуковой пули, механика цикла (буфер foley), эхо стрельбища.
+// src/engine/audio_b/audio.js
 var CAL2 = {
-  "556": { blastF: 7200, blastT: 0.075, bodyF: 150, bodyT: 0.09, body: 0.55, crack: 0.9, level: 1 },
-  "545": { blastF: 7600, blastT: 0.07, bodyF: 140, bodyT: 0.09, body: 0.55, crack: 0.95, level: 1 },
-  "762x39": { blastF: 5200, blastT: 0.1, bodyF: 105, bodyT: 0.13, body: 0.85, crack: 0.75, level: 1.08 },
-  "762x51": { blastF: 5600, blastT: 0.12, bodyF: 90, bodyT: 0.15, body: 1, crack: 1, level: 1.18 },
-  // 9×19 из короткого ствола: сухой хлёсткий хлопок, трескотня почти нет (≈400 м/с)
-  "9x19": { blastF: 6400, blastT: 0.055, bodyF: 165, bodyT: 0.06, body: 0.45, crack: 0.3, level: 0.84, subSupp: true },
-  // 12 калибр: тяжёлый длинный «бум», много низа, дробь почти не трещит
-  "12ga": { blastF: 4300, blastT: 0.15, bodyF: 68, bodyT: 0.2, body: 1.2, crack: 0.12, level: 1.26 },
-  // 7,62×54R: самый громкий, резкий щелчок пули 830 м/с и длинный хвост
-  "762x54R": { blastF: 5100, blastT: 0.125, bodyF: 84, bodyT: 0.16, body: 1.08, crack: 1.15, level: 1.24 }
+  "556": { blastF: 7200, blastT: 0.075, bodyF: 150, bodyT: 0.09, body: 0.55, crack: 0.9, level: 1, mechF: 3400 },
+  "545": { blastF: 7600, blastT: 0.07, bodyF: 140, bodyT: 0.09, body: 0.55, crack: 0.95, level: 1, mechF: 2900 },
+  "762x39": { blastF: 5200, blastT: 0.1, bodyF: 105, bodyT: 0.13, body: 0.85, crack: 0.75, level: 1.08, mechF: 2500 },
+  "762x51": { blastF: 5600, blastT: 0.12, bodyF: 90, bodyT: 0.15, body: 1, crack: 1, level: 1.18, mechF: 2300 }
 };
 var MUZ = {
   bare: { blast: 1.1, lp: 1.1, body: 1, crack: 1, wet: 1, attack: 6e-4, tail: 1, harsh: 0.15 },
   fh: { blast: 1, lp: 0.95, body: 1, crack: 1, wet: 1, attack: 7e-4, tail: 1, harsh: 0.1 },
   comp: { blast: 1.2, lp: 1.1, body: 1.05, crack: 1, wet: 1.15, attack: 5e-4, tail: 1.1, harsh: 0.35 },
-  // линейный: волна уходит вперёд — глуше и мягче у стрелка
+  // линейный: волна уходит вперёд — глуше и мягче у стрелка, без резкого «треска»
   linear: { blast: 0.72, lp: 0.7, body: 0.95, crack: 1, wet: 0.8, attack: 9e-4, tail: 0.85, harsh: 0 },
   brake: { blast: 1.45, lp: 1.3, body: 1.1, crack: 1, wet: 1.35, attack: 4e-4, tail: 1.2, harsh: 0.6 },
-  // дульные насадки гладкоствольного ружья звучат как голый ствол
-  choke: { blast: 1.08, lp: 1.05, body: 1, crack: 1, wet: 1, attack: 6e-4, tail: 1, harsh: 0.12 },
   supp: { blast: 0.075, lp: 0.2, body: 0.32, crack: 0.55, wet: 0.22, attack: 4e-3, tail: 0.6, harsh: 0 }
 };
 var GunAudio = class {
@@ -3104,14 +2875,13 @@ var GunAudio = class {
     this.dry = c.createGain();
     this.dry.connect(this.master);
     this.verb = c.createConvolver();
-    this.verb.buffer = this.impulse(2.6);
+    this.verb.buffer = this.impulse(2.2);
     this.wet = c.createGain();
     this.wet.gain.value = 0.55;
     this.verb.connect(this.wet).connect(this.master);
     this.noise = this.noiseBuf(1.5, "white");
     this.pink = this.noiseBuf(1.5, "pink");
     this.crackBuf = this.nwave();
-    this.foley = new Foley(c);
     const idle = window.requestIdleCallback || ((f) => setTimeout(f, 200));
     idle(() => this.warm());
   }
@@ -3149,24 +2919,34 @@ var GunAudio = class {
     }
     return b;
   }
-  // Импульсная характеристика открытого стрельбища: плотный хвост + отражения от валов.
+  // Импульсная характеристика закрытого тира: ранние отражения от перегородок кабинки,
+  // пола и козырьков, порхающее эхо между параллельными стенами (12 м → 35 мс),
+  // диффузный хвост RT60 ≈ 1,3 с, темнеющий со временем, и слабый отклик пулеулавливателя.
   impulse(sec) {
-    const c = this.ctx, n = Math.floor(c.sampleRate * sec);
-    const b = c.createBuffer(2, n, c.sampleRate);
-    const refl = [[0.045, 0.5], [0.11, 0.35], [0.19, 0.3], [0.31, 0.42], [0.52, 0.22], [0.78, 0.16]];
+    const c = this.ctx, sr = c.sampleRate, n = Math.floor(sr * sec);
+    const b = c.createBuffer(2, n, sr);
+    const early = [[65e-4, 0.55], [8e-3, 0.5], [0.0125, 0.42], [0.021, 0.3], [0.028, 0.33], [0.035, 0.36], [0.047, 0.22], [0.063, 0.2], [0.082, 0.16]];
     for (let ch = 0; ch < 2; ch++) {
       const d = b.getChannelData(ch);
       let lp = 0;
       for (let i = 0; i < n; i++) {
-        const t = i / c.sampleRate;
+        const t = i / sr;
         const w = Math.random() * 2 - 1;
-        lp += (w - lp) * (0.35 - Math.min(0.3, t * 0.14));
-        d[i] = lp * Math.pow(1 - t / sec, 3.2) * 0.35;
+        lp += (w - lp) * (0.5 - Math.min(0.42, t * 0.32));
+        const onset = Math.min(1, t / 0.02);
+        d[i] = lp * Math.exp(-6.9 * t / 1.3) * 0.3 * onset;
       }
-      for (const [t, a] of refl) {
-        const s = Math.floor((t + (ch ? 7e-3 : 0)) * c.sampleRate);
-        for (let j = 0; j < 900 && s + j < n; j++) d[s + j] += (Math.random() * 2 - 1) * a * Math.exp(-j / 180);
-      }
+      const tap = (t, a, len = 360) => {
+        const s0 = Math.floor(t * sr);
+        let f = 0;
+        for (let j = 0; j < len && s0 + j < n; j++) {
+          f += (Math.random() * 2 - 1 - f) * 0.6;
+          d[s0 + j] += f * a * Math.exp(-j / (len * 0.22));
+        }
+      };
+      for (const [t, a] of early) tap(t + (ch ? 11e-4 : 0) + Math.random() * 8e-4, a);
+      for (let k = 1; k < 18; k++) tap(0.035 * k + (ch ? 6e-4 : 0), 0.34 * Math.pow(0.8, k), 280);
+      tap(0.62 + (ch ? 4e-3 : 0), 0.07, 900);
     }
     return b;
   }
@@ -3198,119 +2978,194 @@ var GunAudio = class {
       n.connect(w).connect(this.verb);
     }
   }
-  // Щелчок металла: два полосовых шума с разнесёнными частотами, без синусоид.
-  clank(t, f, level, dur = 0.05, q = 6, pan = 0.1, wet = 0.08) {
-    const c = this.ctx;
-    for (const [k, a] of [[1, 1], [1.61 + Math.random() * 0.3, 0.6]]) {
-      const s = this.src(this.noise, t, dur + 0.02, 1);
-      const bp = c.createBiquadFilter();
-      bp.type = "bandpass";
-      bp.frequency.value = f * k;
-      bp.Q.value = Math.min(q, 4);
-      const g = c.createGain();
-      this.env(g, t, 5e-4, level * a, dur * 0.22, dur + 0.02);
-      s.connect(bp).connect(g);
-      this.out(g, wet, pan);
-    }
-  }
-  // Глухой удар (пластик, ладонь).
-  thud(t, f, level, dur = 0.06, pan = 0) {
-    const c = this.ctx;
-    const s = this.src(this.pink, t, dur + 0.02);
-    const lp = c.createBiquadFilter();
-    lp.type = "lowpass";
-    lp.frequency.value = f;
-    const g = c.createGain();
-    this.env(g, t, 1e-3, level, dur * 0.35, dur + 0.02);
-    s.connect(lp).connect(g);
-    this.out(g, 0.05, pan);
-  }
-  // Шорох/скольжение.
-  slide(t, f0, f1, level, dur, pan = 0.1) {
-    const c = this.ctx;
-    const s = this.src(this.noise, t, dur + 0.02);
-    const bp = c.createBiquadFilter();
-    bp.type = "bandpass";
-    bp.Q.value = 2.5;
-    bp.frequency.setValueAtTime(f0, t);
-    bp.frequency.exponentialRampToValueAtTime(f1, t + dur);
-    const g = c.createGain();
-    g.gain.setValueAtTime(1e-4, t);
-    g.gain.linearRampToValueAtTime(level, t + dur * 0.3);
-    g.gain.linearRampToValueAtTime(1e-4, t + dur);
-    s.connect(bp).connect(g);
-    this.out(g, 0.03, pan);
-  }
-  params() {
-    return { ...CAL2[this.profile.cal] || CAL2["556"], ...this.profile.shot || {} };
-  }
   /* --------------------------------------------------------------- выстрел */
   shot(o = {}) {
     if (!this.ctx || this.muted) return;
     const c = this.ctx, t = c.currentTime + 5e-3;
-    const fam = this.shotFamily();
-    const supp = this.muzzle === "supp";
-    // холодный глушитель: первый выстрел громче (кислород в камерах догорает)
-    const cold = supp && t - this.lastShot > 3;
+    const P = CAL2[this.profile.cal] || CAL2["556"];
+    const M = MUZ[this.muzzle] || MUZ.fh;
+    const v = 0.92 + Math.random() * 0.16;
+    const frp = this.muzzle === "supp" && t - this.lastShot > 3 ? 1.9 : 1;
     this.lastShot = t;
-    const buf = this.shotBuffer(fam, this.muzzle, cold);
-    const s = c.createBufferSource();
-    s.buffer = buf;
-    s.playbackRate.value = 0.975 + Math.random() * 0.05;
-    const g = c.createGain();
-    g.gain.value = (supp ? SUPP_LEVEL[fam] ?? 0.4 : SHOT_LEVEL[fam] ?? 0.9) * (o.gain ?? 1) * 1.15;
-    s.connect(g).connect(this.dry);
-    s.start(t);
-  }
-  shotFamily() {
-    const f = this.profile.family;
-    return SHOT[f] ? f : this.profile.cal === "12ga" ? "m870" : this.profile.cal === "9x19" ? "mp5" : this.profile.cal === "762x54R" ? "svd" : "ak";
-  }
-  // Буферы выстрела: 3 варианта на (оружие, дульное устройство); вариант 0 у глушителя — «холодный».
-  shotBuffer(fam, muzzle, cold) {
-    this.shots = this.shots || new Map();
-    const key = fam + "|" + muzzle;
-    let list = this.shots.get(key);
-    if (!list) {
-      list = [];
-      const sr = this.ctx.sampleRate;
-      for (let v = 0; v < 3; v++) {
-        const [l, r] = renderGunshot(sr, fam, muzzle, this.profile.cal, v);
-        const b = this.ctx.createBuffer(2, l.length, sr);
-        b.getChannelData(0).set(l);
-        b.getChannelData(1).set(r);
-        list.push(b);
-      }
-      this.shots.set(key, list);
+    const L = P.level * v;
+    if (this.muzzle === "supp") {
+      this.shotSupp(t, P, L, v, frp > 1);
+      return;
     }
-    if (muzzle === "supp") return cold ? list[0] : list[1 + (Math.random() * 2 | 0)];
-    return list[Math.random() * list.length | 0];
+    {
+      const s = this.src(this.noise, t, 0.6, 0.9 + Math.random() * 0.2);
+      const lp = c.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(P.blastF * M.lp * (0.9 + Math.random() * 0.2), t);
+      lp.frequency.exponentialRampToValueAtTime(Math.max(300, P.blastF * M.lp * 0.18), t + P.blastT * 2.5);
+      const hp = c.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = this.muzzle === "supp" ? 90 : 55;
+      const g = c.createGain();
+      this.env(g, t, M.attack, 1.25 * L * M.blast * frp, P.blastT * M.tail, 0.7);
+      s.connect(lp).connect(hp).connect(g);
+      this.out(g, 0.9 * M.wet);
+    }
+    if (M.harsh > 0) {
+      const s = this.src(this.noise, t, 0.25);
+      const bp = c.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 2600;
+      bp.Q.value = 1.2;
+      const g = c.createGain();
+      this.env(g, t, 4e-4, 0.9 * L * M.harsh, 0.035, 0.3);
+      s.connect(bp).connect(g);
+      this.out(g, 0.6 * M.wet);
+    }
+    {
+      const osc = c.createOscillator();
+      osc.type = "sine";
+      const f = P.bodyF * (this.muzzle === "supp" ? 0.8 : 1) * (0.95 + Math.random() * 0.1);
+      osc.frequency.setValueAtTime(f, t);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.33, t + P.bodyT);
+      const g = c.createGain();
+      this.env(g, t, 2e-3, 1.1 * L * P.body * M.body * frp, P.bodyT * 0.5, P.bodyT * 3);
+      const ws = c.createWaveShaper();
+      ws.curve = this.softclip || (this.softclip = (() => {
+        const a = new Float32Array(256);
+        for (let i = 0; i < 256; i++) {
+          const x = i / 128 - 1;
+          a[i] = Math.tanh(x * 2.2);
+        }
+        return a;
+      })());
+      osc.connect(ws).connect(g);
+      this.out(g, 0.35 * M.wet);
+      osc.start(t);
+      osc.stop(t + P.bodyT * 3 + 0.05);
+      const s = this.src(this.pink, t, 0.3);
+      const lp = c.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = this.muzzle === "supp" ? 380 : 700;
+      const g2 = c.createGain();
+      this.env(g2, t, 1e-3, 1.6 * L * P.body * M.body * frp, P.bodyT * 0.7, 0.35);
+      s.connect(lp).connect(g2);
+      this.out(g2, 0.5 * M.wet);
+    }
+    {
+      const s = c.createBufferSource();
+      s.buffer = this.crackBuf;
+      const hp = c.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 1800;
+      const g = c.createGain();
+      g.gain.value = 0.55 * P.crack * M.crack * v;
+      s.connect(hp).connect(g);
+      this.out(g, 0.25);
+      s.start(t + 2e-3);
+    }
+    {
+      const mech = (this.profile.mech ?? 0.8) * (this.muzzle === "supp" ? 1.3 : 1);
+      this.play("cycle", { gain: 0.32 * mech, delay: 4e-3, wet: 0.05, pan: 0.15 });
+    }
   }
-  // Кнопка фонаря на торце: резиновый колпачок — глухой «тык» и щелчок микропереключателя.
-  tailcap(on) {
-    if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
-    this.thud(t, 1800, 0.12, 0.012, 0);
-    this.clank(t + 4e-3, on ? 5200 : 4600, 0.1, 8e-3, 4, 0.1, 0.02);
+  // Выстрел с глушителем. voice: длина корпуса (мм) и снижение громкости (дБ).
+  // Слои: приглушённый хлопок с мягкой атакой, «первый выстрел» (кислород в холодной
+  // банке догорает — глухой удар), звон тонкостенного корпуса и перегородок,
+  // шипение газов из торца, газы из окна выброса (у АК и SCAR — сильнее, в лицо),
+  // щелчок пули и механика — теперь они главные в звуке.
+  shotSupp(t, P, L, v, first) {
+    const c = this.ctx;
+    const V = this.voice || { len: 170, loud: -27 };
+    const k = Math.pow(10, ((V.loud ?? -27) + 27) / 20);
+    const fam = this.profile.family;
+    {
+      const s = this.src(this.noise, t, 0.4, 0.9 + Math.random() * 0.2);
+      const lp = c.createBiquadFilter();
+      lp.type = "lowpass";
+      const f0 = Math.min(3200, P.blastF * 0.38);
+      lp.frequency.setValueAtTime(f0, t);
+      lp.frequency.exponentialRampToValueAtTime(320, t + 0.05);
+      const hp = c.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 70;
+      const g = c.createGain();
+      this.env(g, t, 22e-4, 0.4 * L * k * (first ? 2.2 : 1), 0.022, 0.4);
+      s.connect(lp).connect(hp).connect(g);
+      this.out(g, 0.35);
+      const osc = c.createOscillator();
+      const f = P.bodyF * 0.72 * (0.95 + Math.random() * 0.1);
+      osc.frequency.setValueAtTime(f, t);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.4, t + 0.08);
+      const g2 = c.createGain();
+      this.env(g2, t, 3e-3, 0.22 * L * P.body * (first ? 1.9 : 1), 0.035, 0.25);
+      osc.connect(g2);
+      this.out(g2, 0.2);
+      osc.start(t);
+      osc.stop(t + 0.26);
+    }
+    if (first) {
+      const s = this.src(this.pink, t + 2e-3, 0.35);
+      const lp = c.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 520;
+      const g = c.createGain();
+      this.env(g, t + 2e-3, 4e-3, 0.9 * L * P.body, 0.06, 0.35);
+      s.connect(lp).connect(g);
+      this.out(g, 0.45);
+    }
+    {
+      const f0 = 1450 * 170 / Math.max(90, V.len || 170);
+      for (const [m, a, tau] of [[1, 1, 0.05], [2.76, 0.55, 0.032], [5.4, 0.3, 0.02], [8.9, 0.16, 0.012]]) {
+        const o = c.createOscillator();
+        o.frequency.value = f0 * m * (0.97 + Math.random() * 0.06);
+        const g = c.createGain();
+        this.env(g, t + 1e-3, 8e-4, 0.035 * L * a, tau, 0.25);
+        o.connect(g);
+        this.out(g, 0.15, 0.05);
+        o.start(t);
+        o.stop(t + 0.26);
+      }
+    }
+    {
+      const s = this.src(this.noise, t + 3e-3, 0.3);
+      const bp = c.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 2100;
+      bp.Q.value = 0.7;
+      const g = c.createGain();
+      this.env(g, t + 3e-3, 4e-3, 0.16 * L * k, 0.045, 0.3);
+      s.connect(bp).connect(g);
+      this.out(g, 0.2);
+    }
+    {
+      const pg = fam === "ak" ? 0.28 : fam === "scar" ? 0.24 : 0.14;
+      const s = this.src(this.pink, t + 5e-3, 0.2);
+      const lp = c.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 1600;
+      const g = c.createGain();
+      this.env(g, t + 5e-3, 15e-4, pg * L, 0.028, 0.2);
+      s.connect(lp).connect(g);
+      this.out(g, 0.15, 0.2);
+    }
+    {
+      const s = c.createBufferSource();
+      s.buffer = this.crackBuf;
+      const hp = c.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 1800;
+      const g = c.createGain();
+      g.gain.value = 0.5 * P.crack * v;
+      s.connect(hp).connect(g);
+      this.out(g, 0.55);
+      s.start(t + 2e-3);
+    }
+    this.play("cycle", { gain: 0.38 * (this.profile.mech ?? 0.8), delay: 4e-3, wet: 0.08, pan: 0.15 });
   }
-  // Замена батарей: отвернуть крышку, вытряхнуть CR123, вставить, завернуть.
-  batteryChange() {
-    if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
-    for (let i = 0; i < 5; i++) this.slide(t + i * 0.07, 2600, 3400, 0.05, 0.05, 0.05);
-    this.clank(t + 0.42, 3200, 0.12, 0.02, 3, 0.2);
-    this.clank(t + 0.47, 2900, 0.1, 0.02, 3, 0.25);
-    this.thud(t + 0.8, 1500, 0.15, 0.02, 0);
-    this.thud(t + 0.9, 1500, 0.15, 0.02, 0);
-    for (let i = 0; i < 5; i++) this.slide(t + 1.05 + i * 0.07, 3400, 2600, 0.05, 0.05, 0.05);
-    this.clank(t + 1.45, 4200, 0.12, 0.012, 4, 0);
-  }
+  // Механика и перезарядка — синтезированные буферы (foley.js): без тональных «звонов».
   play(name, o = {}) {
     if (!this.ctx || this.muted) return;
     const c = this.ctx;
+    if (!this.foley) this.foley = new Foley(c);
     const P = this.profile;
     const s = c.createBufferSource();
-    s.buffer = this.foley.buffer(name, { fam: P.family, cal: P.cal, kind: o.kind });
+    s.buffer = this.foley.buffer(name, { fam: P.family, cal: P.cal, kind: o.kind, fill: o.fill, rpm: name === "cycle" ? P.rpm : void 0 });
     s.playbackRate.value = 0.96 + Math.random() * 0.08;
     const g = c.createGain();
     g.gain.value = (o.gain ?? 1) * 0.9;
@@ -3327,8 +3182,17 @@ var GunAudio = class {
   click() {
     this.play("click", { gain: 0.6, pan: 0 });
   }
-  magOut(kind = "steel") {
-    this.play("magOut", { kind, gain: 0.95 });
+  magOut(kind = "steel", fill = 2) {
+    this.play("magOut", { kind, fill, gain: 0.95 });
+  }
+  pouch(kind = "steel") {
+    this.play("pouch", { kind, fill: 2, gain: 0.7, pan: 0.25 });
+  }
+  tug(kind = "steel") {
+    this.play("tug", { kind, gain: 0.6 });
+  }
+  shoulder(on) {
+    this.play(on ? "shoulder" : "unshoulder", { gain: on ? 0.42 : 0.35, pan: 0 });
   }
   magInsert(kind = "steel") {
     this.play("magInsert", { kind, gain: 0.85 });
@@ -3336,8 +3200,8 @@ var GunAudio = class {
   magIn(kind = "steel") {
     this.play("magIn", { kind, gain: 1.1 });
   }
-  magDropGround(kind = "steel") {
-    this.play("magGround", { kind, gain: 0.7, pan: 0.3, wet: 0.12 });
+  magDropGround(kind = "steel", fill = 2) {
+    this.play("magGround", { kind, fill, gain: 0.75, pan: 0.3, wet: 0.2 });
   }
   chargeBack() {
     this.play("chargeBack", { gain: 0.95 });
@@ -3348,66 +3212,47 @@ var GunAudio = class {
   boltCatch() {
     this.play("boltCatch", { gain: 1.05 });
   }
-  boltSlam() {
-    this.play("boltSlam", { gain: 1 });
-  }
-  hkLock() {
-    this.play("hkLock", { gain: 0.9 });
-  }
-  pumpBack() {
-    this.play("pumpBack", { gain: 1 });
-  }
-  pumpForward() {
-    this.play("pumpForward", { gain: 1.05 });
-  }
-  shellLoad() {
-    this.play("shellLoad", { gain: 0.95, pan: 0 });
-  }
-  // Заранее синтезировать буферы этого оружия (вызывается при первом взаимодействии).
+  // заранее синтезировать буферы (вызывается при первом взаимодействии)
   warm() {
     if (!this.ctx) return;
+    if (!this.foley) this.foley = new Foley(this.ctx);
     const P = this.profile, o = { fam: P.family, cal: P.cal };
-    const names = P.family === "m870" ? ["pumpBack", "pumpForward", "shellLoad"] : ["magOut", "magInsert", "magIn", "magGround", "chargeBack", "chargeRelease", "boltCatch"];
-    for (const n of names) for (const kind of ["steel", "poly"]) this.foley.buffer(n, { ...o, kind });
-    for (const n of ["dryFire", "selector", "click", "hkLock", "boltSlam"]) this.foley.buffer(n, o);
-    for (const kind of ["brass", "steel", "hull"]) this.foley.buffer("casing", { ...o, kind });
-    this.foley.buffer("cycle", { fam: P.family, rpm: P.rpm });
-    this.shotBuffer(this.shotFamily(), this.muzzle || "bare");
+    for (const n of ["magOut", "magInsert", "magIn", "magGround"]) for (const kind of ["steel", "poly"]) this.foley.buffer(n, { ...o, kind });
+    for (const n of ["chargeBack", "chargeRelease", "boltCatch", "dryFire", "selector", "click"]) this.foley.buffer(n, o);
+    this.foley.buffer("cycle", { ...o, rpm: P.rpm });
+    for (const kind of ["steel", "poly"]) this.foley.buffer("tick", { ...o, kind });
+    for (const kind of ["steel", "brass"]) this.foley.buffer("casing", { ...o, kind });
   }
   // Установка модуля: щелчки прижима или храповик резьбы.
   attach(kind) {
     if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
     if (kind === "thread" || kind === "supp") {
-      for (let i = 0; i < 7; i++) this.clank(t + i * 0.055, 3600 + Math.random() * 400, 0.08, 0.01, 4, 0);
-      this.clank(t + 0.42, 2300, 0.18, 0.03, 3, 0);
+      for (let i = 0; i < 6; i++) this.play("tick", { kind: "steel", gain: 0.25 + Math.random() * 0.1, delay: i * 0.06 + Math.random() * 0.01, pan: 0 });
+      this.play("tick", { kind: "steel", gain: 0.6, delay: 0.42, pan: 0 });
     } else if (kind === "poly") {
-      this.thud(t, 1400, 0.25, 0.04);
-      this.clank(t + 0.03, 3e3, 0.1, 0.015, 4, 0);
+      this.play("tick", { kind: "poly", gain: 0.6, pan: 0 });
+      this.play("tick", { kind: "steel", gain: 0.25, delay: 0.03, pan: 0 });
     } else {
-      this.clank(t, 2600, 0.2, 0.025, 3, 0);
-      this.clank(t + 0.09, 3900, 0.14, 0.015, 4, 0);
-      this.slide(t + 0.12, 3e3, 5e3, 0.05, 0.08, 0);
+      this.play("tick", { kind: "steel", gain: 0.55, pan: 0 });
+      this.play("tick", { kind: "steel", gain: 0.35, delay: 0.09, pan: 0 });
     }
   }
   fold() {
-    if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
-    this.clank(t, 2400, 0.22, 0.025, 3, 0.1);
-    this.clank(t + 0.22, 1900, 0.35, 0.035, 3, 0.1);
+    this.play("tick", { kind: "steel", gain: 0.5 });
+    this.play("tick", { kind: "steel", gain: 0.8, delay: 0.22 });
   }
   bipod() {
-    if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
-    this.slide(t, 1500, 3e3, 0.08, 0.12);
-    this.clank(t + 0.12, 2100, 0.3, 0.035, 3, 0);
-    this.clank(t + 0.15, 2300, 0.25, 0.035, 3, 0);
+    this.play("tick", { kind: "steel", gain: 0.6, delay: 0.12, pan: 0 });
+    this.play("tick", { kind: "steel", gain: 0.5, delay: 0.15, pan: 0 });
   }
   // Гильза падает на бетон/землю.
-  casing(delay = 0.5, kind = "brass", vol = 1) {
-    this.play("casing", { kind, gain: 0.5 * vol, delay, pan: 0.35 + Math.random() * 0.3, wet: 0.1 });
+  casing(delay = 0.5, steel = false, vol = 1) {
+    // общий движок передаёт вид гильзы строкой: "brass" | "steel" | "hull"
+    if (typeof steel === "string") steel = steel === "steel";
+    if (!this.ctx || this.muted) return;
+    this.play("casing", { kind: steel ? "steel" : "brass", gain: 0.22 * vol, delay, pan: 0.35 + Math.random() * 0.3, wet: 0.1 });
   }
-  // Попадание в стальную мишень: плита действительно звенит; приходит с задержкой по дальности.
+  // Попадание в стальную мишень: звон, приходит с задержкой по дальности.
   ding(dist, level = 1) {
     if (!this.ctx || this.muted) return;
     const c = this.ctx, t = c.currentTime + dist / 343;
@@ -3435,6 +3280,59 @@ var GunAudio = class {
     this.env(g, t, 3e-3, 0.25 * a, 0.05, 0.2);
     s.connect(lp).connect(g);
     this.out(g, 0.3);
+  }
+  // Попадание по поверхности тира: бетон — сухой щелчок с крошкой, дерево — глухой тук,
+  // стальной пулеулавливатель — короткий звон ламелей.
+  impact(surf, dist) {
+    if (!this.ctx || this.muted) return;
+    if (surf === "trap") {
+      this.ding(dist, 0.3);
+      this.thump(dist);
+      return;
+    }
+    const c = this.ctx, t = c.currentTime + dist / 343;
+    const a = Math.min(1, 10 / Math.max(5, dist));
+    const s = this.src(this.noise, t, 0.12);
+    const bp = c.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = surf === "wood" ? 700 : surf === "panel" ? 1800 : 2400;
+    bp.Q.value = 0.9;
+    const g = c.createGain();
+    this.env(g, t, 1e-3, 0.3 * a, surf === "wood" ? 0.03 : 0.018, 0.14);
+    s.connect(bp).connect(g);
+    this.out(g, 0.35);
+    this.thump(dist);
+  }
+  // Кнопка фонаря на торцевой крышке: мягкий нажим и щелчок фиксации.
+  tailcap(on) {
+    this.play("tick", { kind: "poly", gain: 0.35, pan: 0.1 });
+    this.play("click", { gain: on ? 0.55 : 0.45, delay: 0.012, pan: 0.1 });
+  }
+  // Рубильник освещения тира — далёкий щелчок и эхо зала.
+  lightSwitch() {
+    if (!this.ctx || this.muted) return;
+    this.play("tick", { kind: "steel", gain: 0.25, pan: -0.5, wet: 0.5 });
+    this.play("tick", { kind: "steel", gain: 0.18, delay: 0.05, pan: -0.5, wet: 0.6 });
+  }
+  // Замена батарей: крышка откручивается (резьба), элементы выпадают в ладонь,
+  // новые вставляются, крышка закручивается до упора. Возвращает длительность, с.
+  batteryChange() {
+    const D = 3.1;
+    if (!this.ctx || this.muted) return D;
+    let t = 0;
+    for (let i = 0; i < 7; i++) {
+      this.play("tick", { kind: "steel", gain: 0.2 + Math.random() * 0.08, delay: t, pan: 0.2 });
+      t += 0.07 + Math.random() * 0.03;
+    }
+    this.play("battCells", { delay: 0.85, gain: 0.3, pan: 0.15 });
+    this.play("battCells", { delay: 1.55, gain: 0.25, pan: 0.15 });
+    t = 2.05;
+    for (let i = 0; i < 7; i++) {
+      this.play("tick", { kind: "steel", gain: 0.2 + Math.random() * 0.08, delay: t, pan: 0.2 });
+      t += 0.07 + Math.random() * 0.03;
+    }
+    this.play("tick", { kind: "steel", gain: 0.5, delay: t + 0.05, pan: 0.2 });
+    return D;
   }
 };
 
@@ -9317,498 +9215,627 @@ function slingLoop(ctx, k, mat, p, o = {}) {
   k.add("steelWorn", wr([[p[0] - w / 2, p[1], p[2] + side * 2], [p[0] - w / 2, p[1] + side * 0, p[2] + side * h * 0.6], [p[0], p[1], p[2] + side * h], [p[0] + w / 2, p[1], p[2] + side * h * 0.6], [p[0] + w / 2, p[1], p[2] + side * 2]], 1.4, { n: 30 }));
 }
 
-// src/weapons/svd.js
-// СВД: газоотводная автоматика с коротким ходом поршня, фрезерованная коробка, «ласточкин хвост» слева.
-// Единицы — мм, ось канала ствола y = 0, x = 0 — передний срез коробки, +z — правый борт.
-var SV = {
-  FRONT: 26,
-  REAR: -236,
-  WALL: 12,
-  BOTTOM: -26,
-  GAS_Y: 25,
-  GAS_R: 8,
-  SIGHT_Y: 46,
-  REAR_X: 64,
-  FRONT_X: 596,
-  MUZZLE: 612,
-  MAG_X: 2
+// src/weapons/m416_parts.js
+var RAIL_TOP = 30.5;
+var CW = 0.6;
+var SEG = { a: [[0, 1], [CW, 1]], b: [[CW, 1], [CW, 0.5]], c: [[CW, 0.5], [CW, 0]], d: [[0, 0], [CW, 0]], e: [[0, 0], [0, 0.5]], f: [[0, 0.5], [0, 1]], g: [[0, 0.5], [CW, 0.5]] };
+var SEGS = { 0: "abcdef", 1: "bc", 2: "abged", 3: "abgcd", 4: "fgbc", 5: "afgcd", 6: "afgedc", 7: "abc", 8: "abcdefg", 9: "abcdfg", A: "efabcg", E: "afged", F: "afge", H: "fbgec", S: "afgcd", C: "afed", L: "fed", P: "efabg", "-": "g" };
+var STROKES = {
+  K: [[[0, 0], [0, 1]], [[0, 0.45], [CW, 1]], [[0.18, 0.6], [CW, 0]]],
+  M: [[[0, 0], [0, 1]], [[0, 1], [CW / 2, 0.45]], [[CW / 2, 0.45], [CW, 1]], [[CW, 1], [CW, 0]]],
+  X: [[[0, 0], [CW, 1]], [[0, 1], [CW, 0]]],
+  T: [[[0, 1], [CW, 1]], [[CW / 2, 1], [CW / 2, 0]]]
 };
-function svdReceiver(ctx, k) {
-  const { extrudeX: exX, extrudeZ: exZ, extrudeY: exY, T: T2, box: bx, cylZ: cZ, latheX: lX, shape: sh, rrect: rr } = ctx.G;
-  const { FRONT: F, REAR: R4, WALL: W, BOTTOM: B } = SV;
-  const M = "steel";
-  // фрезерованные борта: окно выброса справа и выборка под рукоять затворной рамы
-  const right = [[F, B, 1], [F, W], [-8, W], [-8, 0, 1], [-96, 0, 1], [-96, 8], [-214, 8], [-214, W], [R4, W], [R4, -14, 2], [R4 + 10, B, 3]];
-  const left = [[F, B, 1], [F, W], [R4, W], [R4, -14, 2], [R4 + 10, B, 3]];
-  k.add(M, exZ(right, 2.2, { bevel: 0.5, z: 14.4 }));
-  k.add(M, exZ(left, 2.2, { bevel: 0.5, z: -14.4 }));
-  k.add(M, exY(sh(rr((F + R4) / 2, 0, F - R4, 30, 1), [rr(-40, 0, 80, 24, 2)]), B - 1.6, B, { bevel: 0.3 }));
-  k.add(M, exX(rr(0, (B + W) / 2 - 2, 27, W - B - 4, 1), 6, F, { bevel: 0.6 }));
-  k.add(M, exX(rr(0, (B + W) / 2 - 2, 27, W - B - 6, 1), R4, R4 + 16, { bevel: 0.6 }));
-  k.add("lensBlack", exX(rr(0, -8, 26, 8, 0), -213, 4, { bevel: 0 }));
-  // продольные рёбра фрезеровки и выборки облегчения
+var BASIS = { right: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], left: [[-1, 0, 0], [0, 1, 0], [0, 0, -1]], top: [[0, 0, 1], [1, 0, 0], [0, 1, 0]] };
+function engrave(ctx, text, o = {}) {
+  const { G, THREE: THREE9 } = ctx;
+  const h = o.h ?? 3, t = o.t ?? Math.max(0.28, h * 0.13), d = o.d ?? 0.12;
+  const adv = (CW + 0.4) * h, total = text.length * adv - 0.4 * h;
+  const gs = [];
+  [...text].forEach((ch, i) => {
+    const x0 = -total / 2 + i * adv;
+    const list = (STROKES[ch] || [...SEGS[ch] || ""].map((s) => SEG[s])).slice();
+    if (ch === "." || ch === ",") list.push([[CW / 2, 0], [CW / 2, ch === "," ? -0.18 : 0.02]]);
+    for (const [[ax, ay], [bx, by]] of list) {
+      const px = x0 + ax * h, py = (ay - 0.5) * h, qx = x0 + bx * h, qy = (by - 0.5) * h;
+      gs.push(G.T(G.box(Math.hypot(qx - px, qy - py) + t, t, d, { bevel: 0 }), { r: [0, 0, Math.atan2(qy - py, qx - px) * 180 / Math.PI], p: [(px + qx) / 2, (py + qy) / 2, d / 2] }));
+    }
+  });
+  const g = G.merge(gs);
+  if (!g) return null;
+  const B = BASIS[o.basis || "right"], p = o.p || [0, 0, 0];
+  const m = new THREE9.Matrix4().makeBasis(new THREE9.Vector3(...B[0]), new THREE9.Vector3(...B[1]), new THREE9.Vector3(...B[2]));
+  m.setPosition(p[0], p[1], p[2]);
+  return g.applyMatrix4(m);
+}
+function railMarks(ctx, r, n0 = 1, o = {}) {
+  const gs = [];
+  for (let i = 0; i < r.slots - 1; i++) {
+    gs.push(engrave(ctx, String(n0 + i), { h: o.h ?? 2.3, d: 0.1, basis: "top", p: [r.first + (i + 0.5) * ctx.G.PICA.PITCH, -0.04, 0] }));
+  }
+  return ctx.G.merge(gs);
+}
+function arc(cz, cy, r, t0, t1, n) {
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const t = t0 + (t1 - t0) * (i / n);
+    out.push([cz + Math.cos(t) * r, cy + Math.sin(t) * r]);
+  }
+  return out;
+}
+function quadRail(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  const x0 = 2, x1 = 252;
+  const a = 26, f = 10.5, R4 = 17.5, cy = 2;
+  const zAt = (y) => a - (-y - f);
+  const ys = -12, yl = -12.7;
+  const dzU = Math.sqrt(R4 * R4 - (ys - cy) ** 2), dzL = Math.sqrt(R4 * R4 - (yl - cy) ** 2);
+  const upper = [
+    [zAt(ys), ys, 0.9],
+    [a, -f, 2.2],
+    [a, f, 2.2],
+    [f, a, 2.2],
+    [-f, a, 2.2],
+    [-a, f, 2.2],
+    [-a, -f, 2.2],
+    [-zAt(ys), ys, 0.9],
+    ...arc(0, cy, R4, Math.atan2(ys - cy, -dzU), Math.atan2(ys - cy, dzU) - Math.PI * 2, 36)
+  ];
+  const lower = [
+    [-zAt(yl), yl, 0.9],
+    [-f, -a, 2.2],
+    [f, -a, 2.2],
+    [zAt(yl), yl, 0.9],
+    ...arc(0, cy, R4, Math.atan2(yl - cy, dzL), Math.atan2(yl - cy, -dzL), 12)
+  ];
+  k.add("alu", G.extrudeX(upper, x0 + 6, x1 - 10, { bevel: 1 }));
+  k.add("alu", G.extrudeX(lower, x0 + 10, x1 - 13, { bevel: 1 }));
+  const ringP = (d, rr) => [[-f - d, a + d], [f + d, a + d], [a + d, f + d], [a + d, -f - d], [f + d, -a - d], [-f - d, -a - d], [-a - d, -f - d], [-a - d, f + d]].map((p) => [...p, rr]);
+  k.add("alu", G.extrudeX(G.shape(ringP(1.5, 3), [G.circle(0, cy, R4, 32)]), x1 - 14, x1 - 2, { bevel: 1.4 }));
+  k.add("alu", G.extrudeX(G.shape(ringP(0.6, 2.6), [G.circle(0, 0, 11.2, 32)]), x1 - 3.5, x1, { bevel: 1 }));
+  k.add("alu", G.extrudeX(G.shape(ringP(1.5, 3), [G.circle(0, 0, 16, 32)]), x0, x0 + 11, { bevel: 1.2 }));
+  const dia = (a + f) / Math.SQRT2 + 0.1;
+  for (const s of [-1, 1]) for (const x of [x0 + 18, x0 + 30, x1 - 22]) {
+    k.add("steel", G.T(G.screwHead(2.7, 1.3, { seg: 6 }), { r: [s > 0 ? 45 : 135, 0, 0], p: [x, -dia * Math.SQRT1_2, s * dia * Math.SQRT1_2] }));
+  }
+  const len = x1 - x0 - 2;
+  const mounts = [];
+  const faces = [["hgTop", "top", [0, 0, 0], [0, RAIL_TOP, 0], 18], ["hgRight", "right", [90, 0, 0], [0, 0, RAIL_TOP], 1], ["hgBottom", "bottom", [180, 0, 0], [0, -RAIL_TOP, 0], 1], ["hgLeft", "left", [-90, 0, 0], [0, 0, -RAIL_TOP], 1]];
+  for (const [id, face, rot, off, n0] of faces) {
+    const rr = G.picatinny(len, { base: RAIL_TOP - a + 0.5 });
+    k.add("alu", rr.geo, { r: rot, p: [x0 + 1 + off[0], off[1], off[2]] });
+    k.add("steelWorn", railMarks(ctx, rr, n0), { r: rot, p: [x0 + 1 + off[0], off[1], off[2]] });
+    const p = [x0 + 1 + rr.first, off[1], off[2]];
+    mounts.push(ctx.railMount(id, p, face, rr.slots, { axis: face }));
+  }
+  const root = G.node("hk_quad", [k.build(), ...mounts]);
+  return { root };
+}
+function mlokRail(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  const x0 = 2, x1 = 262, R4 = 24, t = 3.2;
+  const w = 2 * R4 * Math.tan(Math.PI / 8) + 0.6;
+  for (let i = 0; i < 8; i++) {
+    const a = i * 45;
+    if (a === 0) continue;
+    const holes = G.mlokHoles(x0 + 26, x1 - 14, 0, { pitch: 40 });
+    const plate = G.shape(G.rrect((x0 + x1) / 2, 0, x1 - x0, w, 0.8), a % 90 === 0 ? holes : holes.filter((_, j) => j % 2 === 1));
+    const g = G.extrudeZ(plate, t, { bevel: 0.6, z: R4 - t / 2 });
+    k.add("alu", G.T(g, { r: [a - 90, 0, 0] }));
+  }
+  k.add("alu", G.extrudeX(G.rrect(0, R4 - 2, w + 1, 5, 1), x0, x1, { bevel: 0.6 }));
+  k.add("alu", G.extrudeX(G.shape(G.circle(0, 0, R4 + 2.5, 8).map((p) => [p[0], p[1], 2]), [G.circle(0, 0, 16, 32)]), x0, x0 + 12, { bevel: 1 }), null);
+  k.add("alu", G.extrudeX(G.shape(G.circle(0, 0, R4 + 1.5, 8).map((p) => [p[0], p[1], 2]), [G.circle(0, 0, 17, 32)]), x1 - 6, x1, { bevel: 1 }), null);
+  for (const s of [-1, 1]) for (const x of [x0 + 3.5, x0 + 8.5]) {
+    const ap = (R4 + 2.5) * Math.cos(Math.PI / 8);
+    k.add("steel", G.T(G.screwHead(2.2, 1.1), { r: [s > 0 ? 22.5 : 157.5, 0, 0], p: [x, -ap * Math.sin(Math.PI / 8), s * ap * Math.cos(Math.PI / 8)] }));
+  }
+  k.add("alu", G.extrudeX(G.rrect(0, R4 + 3.5, 12, 4, 1), x0 - 5, x0 + 1, { bevel: 0.6 }));
+  const mounts = [];
+  const top = G.picatinny(x1 - x0 - 2, { base: RAIL_TOP - R4 + 0.5 });
+  k.add("alu", top.geo, { p: [x0 + 1, RAIL_TOP, 0] });
+  k.add("steelWorn", railMarks(ctx, top, 18), { p: [x0 + 1, RAIL_TOP, 0] });
+  mounts.push(ctx.railMount("hgTop", [x0 + 1 + top.first, RAIL_TOP, 0], "top", top.slots, { axis: "top" }));
+  const sections = [["hgBottom", "bottom", 180, 102, [0, -R4 - 0.2, 0]], ["hgRight", "right", 90, 72, [0, 0, R4 + 0.2]], ["hgLeft", "left", -90, 72, [0, 0, -R4 - 0.2]]];
+  for (const [id, face, rot, len, off] of sections) {
+    const xs = x1 - 18 - len;
+    const rr = G.picatinny(len, { base: 9.6 });
+    const sk = ctx.kit();
+    sk.add("alu", rr.geo, { p: [0, 9.4, 0] });
+    sk.add("steel", G.T(G.screwHead(2.6, 1.2), { r: [-90, 0, 0] }), { p: [len * 0.25, 9.6, 0] });
+    sk.add("steel", G.T(G.screwHead(2.6, 1.2), { r: [-90, 0, 0] }), { p: [len * 0.75, 9.6, 0] });
+    const sec = sk.build();
+    const holder = G.node("sec:" + id, [sec]);
+    holder.position.set(xs, off[1], off[2]);
+    holder.rotation.x = rot * Math.PI / 180;
+    mounts.push(holder);
+    const m = ctx.railMount(id, [xs + rr.first, (off[1] ? Math.sign(off[1]) : 0) * (R4 + 9.6), (off[2] ? Math.sign(off[2]) : 0) * (R4 + 9.6)], face, rr.slots, { axis: face });
+    mounts.push(m);
+  }
+  return { root: G.node("hk_mlok", [k.build(), ...mounts]) };
+}
+function hkFront(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit(), f = ctx.kit();
+  k.add("alu", ctx.C.clampBody(-11, 11, 5));
+  k.add("steel", ctx.C.crossBolt(0));
+  k.add("steel", G.cylZ(2.2, -14.6, -12.8, { seg: 14, c: 0.4 }), { p: [-6.5, 2.2, 0] });
+  f.add("alu", G.extrudeZ([[-9, 0, 1], [7, 0, 1], [7, 11, 2], [-9, 9, 2]], 16, { bevel: 0.8 }));
+  for (const s of [-1, 1]) f.add("alu", G.extrudeZ([[-7, 8], [5, 8], [4, 24.6, 2], [-4.5, 24.6, 2]], 2.6, { bevel: 0.6, z: s * 6.2 }));
+  f.add("alu", G.T(G.tubeX(9.6, 7.9, -4.5, 4.5, { seg: 40, c: 0.6 }), { p: [0, 30.5, 0] }));
+  f.add("steel", G.cylY(3.3, 9, 13.5, { seg: 20, c: 0.5 }));
+  f.add("steel", G.T(G.flutesX(3.1, 9.5, 13, 12, 0.8, 0.5), { r: [0, 0, 90] }));
+  f.add("steel", G.cylY(1.9, 13, 30.5, { seg: 12, c: 0.3 }));
+  f.add("steel", G.extrudeZ([[-1, 30], [1, 30], [0.8, 35.5, 0.3], [-0.8, 35.5, 0.3]], 1.6, { bevel: 0.2 }));
+  f.add("tritium", G.T(G.sphere(0.55), { p: [-0.9, 34.4, 0] }));
+  const flip = G.node("flip", [f.build()]);
+  flip.position.set(-9, 5, 0);
+  flip.children[0].position.set(9, -5, 0);
+  return { root: G.node("hk_front", [k.build(), flip]), irons: { front: [0, 35.5, 0] }, flip: { node: flip, angle: 90 } };
+}
+function hkDiopter(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit(), f = ctx.kit();
+  k.add("alu", ctx.C.clampBody(-15, 15, 5.5));
+  k.add("steel", ctx.C.crossBolt(0));
+  const ear = [[-12, 0, 1], [12, 0, 1], [12, 30, 3], [7, 46, 4], [-7, 46, 4], [-12, 30, 3]];
+  f.add("alu", G.extrudeZ(ear, 3, { bevel: 0.6, z: 11 }));
+  f.add("alu", G.extrudeZ(ear, 3, { bevel: 0.6, z: -11 }));
+  f.add("alu", G.extrudeZ([[-12, 0, 1], [12, 0, 1], [12, 22, 2], [-12, 22, 2]], 25, { bevel: 0.8 }));
+  const AP = 2.1, Y = 35.5;
+  for (const s of [-1, 1]) f.add("steel", G.T(G.cylZ(9.8, s > 0 ? AP : -8.5, s > 0 ? 8.5 : -AP, { seg: 28, c: 0.6 }), { p: [0, Y, 0] }));
+  const half = (sg) => {
+    const pts = [];
+    for (let i = 0; i <= 14; i++) {
+      const a = Math.asin(AP / 9.8) + i / 14 * (Math.PI - 2 * Math.asin(AP / 9.8));
+      pts.push([Math.cos(a) * 9.8, sg * Math.sin(a) * 9.8]);
+    }
+    return pts;
+  };
+  for (const sg of [-1, 1]) f.add("steel", G.T(G.extrudeZ(half(sg), AP * 2 + 0.2, { bevel: 0.2 }), { p: [0, Y, 0] }));
+  for (let a = 0; a < 360; a += 15) {
+    if (Math.min(Math.abs(a - 180), a, 360 - a) < 25 || Math.abs(a - 90) < 8 || Math.abs(a - 270) < 8) continue;
+    const t = a * Math.PI / 180;
+    f.add("steel", G.T(G.box(1.1, 0.9, 15.6, { bevel: 0.25 }), { r: [0, 0, a], p: [Math.cos(t) * 10, Y + Math.sin(t) * 10, 0] }));
+  }
+  for (const s of [-1, 1]) f.add("lensBlack", G.cylY(1.4, -0.25, 0.25, { seg: 14 }), { p: [0, Y + s * 9.6, 0] });
+  for (const [txt, a] of [["2", 90], ["3", 0], ["4", 270], ["5", 180]]) {
+    const t = a * Math.PI / 180;
+    f.add("steelWorn", engrave(ctx, txt, { h: 2.4, basis: "right", p: [Math.cos(t) * 6, Y + Math.sin(t) * 6, 8.45] }));
+  }
+  f.add("steel", G.T(G.tubeX(6.2, AP, -10.6, -9.2, { seg: 32, c: 0.3 }), { p: [0, Y, 0] }));
+  f.add("steel", G.T(ctx.C.knob(5, 2.9, 14), { r: [0, -90, 0], p: [0, Y, 9.5] }));
+  f.add("paintWhite", G.box(0.5, 3, 0.2, { bevel: 0 }), { p: [0, Y + 2.2, 12.45] });
+  const flip = G.node("flip", [f.build()]);
+  flip.position.set(12, 5.5, 0);
+  flip.children[0].position.set(-12, -5.5, 0);
+  return { root: G.node("hk_diopter", [k.build(), flip]), irons: { rear: [0, 35.5, 0], type: "aperture" }, flip: { node: flip, angle: -90 } };
+}
+function hkFlashHider(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  const flat = G.circle(0, 0, 10.6, 40).map(([z, y]) => [Math.max(-8.8, Math.min(8.8, z)), y]);
+  k.add("steel", G.extrudeX(flat, -11, 5, { bevel: 0.7 }));
+  k.add("steel", G.latheX([[4, 0], [4, 10.6], [14, 10.6], [15.2, 10.1], [15.2, 6.8], [16.2, 3.2], [16.2, 0]], { seg: 40 }));
+  k.add("lensBlack", G.cylX(3.2, 15.6, 16.4, { seg: 16 }));
+  const r0 = 6.8, r1 = 10.5, sw = 1.4;
+  const ho = Math.PI / 6 - sw / r1, hi = Math.PI / 6 - sw / r0;
+  const tine = [];
+  for (let j = 0; j <= 8; j++) {
+    const t = -ho + 2 * ho * j / 8;
+    tine.push([Math.sin(t) * r1, Math.cos(t) * r1]);
+  }
+  for (let j = 8; j >= 0; j--) {
+    const t = -hi + 2 * hi * j / 8;
+    tine.push([Math.sin(t) * r0, Math.cos(t) * r0]);
+  }
+  for (let i = 0; i < 6; i++) k.add("steel", G.T(G.extrudeX(tine, 14.8, 49.4, { bevel: 0.45 }), { r: [i * 60 + 30, 0, 0] }));
+  k.add("steel", G.latheX([[49, r0], [49, r1], [52.4, r1], [53.5, 9.4], [53.5, 7.6], [52.9, r0], [49, r0]], { seg: 40 }));
+  return { root: k.build("hk_fh"), muzzle: { x: 53.5, kind: "fh", flash: 0.35 } };
+}
+function stockHkSlim(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  k.add("poly", G.sideLoft([[-10, 25], [40, 25], [88, 24], [130, 21], [152, 16]], [[-10, -94], [4, -86], [60, -52], [116, -22], [152, -16]], { w: 38, k: 3.6, width: (t) => 0.9 + 0.1 * t, rings: 28 }));
+  const slotO = G.slot(9, 35, -48, 9, 8), slotI = G.slot(10.6, 33.4, -48, 5.8, 8);
+  const pan = G.shape([[4, -26, 5], [96, -22, 5], [60, -40, 6], [12, -66, 6], [4, -64, 3]], [slotO]);
   for (const s of [-1, 1]) {
-    k.add(M, T2(exZ([[-200, -10], [-110, -10], [-108, -6, 1], [-202, -6, 1]], 1, { bevel: 0.3 }), { p: [0, 0, s * 15.6] }));
-    k.add(M, exX(rr(s * 14.8, W - 0.6, 3.4, 1.6, 0.4), R4, F, { bevel: 0.2 }));
+    k.add("polySoft", G.extrudeZ(pan, 3.6, { bevel: 0.5, z: s * 16.4 }));
+    k.add("poly", G.extrudeZ(G.shape(slotO, [slotI]), 1.2, { bevel: 0.35, z: s * 17.1 }));
+    k.add("lensBlack", G.extrudeZ(slotI, 0.3, { bevel: 0.05, z: s * 17.15 }));
   }
-  // «ласточкин хвост» на левом борту
-  k.add("steel", exX(sh([[-15.5, -12, 1], [-15.5, 6, 1], [-19, 8], [-24, 5, 1], [-24, -9, 1], [-19, -12]]), -176, -60, { bevel: 0.6 }));
-  for (const x of [-150, -84]) k.add("steelWorn", T2(cZ(3, -25, -23.6, { seg: 14 }), { p: [x, -2, 0] }));
-  // штифты и защёлка магазина
-  // оси УСМ (спуск, курок, автоспуск) и штифты ствольной вставки — головки на обоих бортах
-  for (const s of [-1, 1]) for (const [x, y, r] of [[-118, -20, 2.4], [-150, -13, 2.4], [-178, -16, 2], [-10, -18, 2], [14, -18, 2]]) k.add("steelWorn", T2(cZ(r, 0, 0.9, { seg: 14, c: 0.3 }), { p: [x, y, s > 0 ? 15.4 : -16.3] }));
-  // клеймо Ижмаша (треугольник со стрелой) и номер — тонкая гравировка на левом борту
-  k.add("lensBlack", exZ(sh([[-44, -16], [-30, -16], [-37, -4]], [[[-41.6, -14.6], [-37, -6.6], [-32.4, -14.6]]]), 0.3, { bevel: 0, z: -15.6 }));
-  k.add("lensBlack", T2(bx(0.8, 7, 0.3, { bevel: 0 }), { p: [-37, -11, -15.62] }));
-  for (let i = 0; i < 7; i++) k.add("lensBlack", T2(bx(2.6, 4, 0.3, { bevel: 0 }), { p: [-86 + i * 4.2, -18, -15.62] }));
-  // защёлка магазина АК-типа: сразу за горловиной, перед скобой, на оси между двумя ушками
-  k.add(M, exZ([[-87, B + 1], [-96, B + 1], [-97, -36, 2], [-100, -43, 2], [-94, -45, 2], [-88, -35, 1]], 11, { bevel: 0.8 }));
-  for (const s of [-1, 1]) k.add(M, T2(bx(9, 7, 2.2, { bevel: 0.5 }), { p: [-92, B - 2.6, s * 6.8] }));
-  k.add("steelWorn", T2(cZ(1.6, -8.2, 8.2, { seg: 12 }), { p: [-92, B - 3, 0] }));
-  // спусковая скоба (штампованная, с отбортовкой) на двух заклёпках
-  const tg = sh([[-98, B], [-166, B], [-166, -32, 3], [-154, -48, 6], [-110, -50, 6], [-98, -38, 3]], [[[-104, B - 2.5], [-160, B - 2.5], [-152, -43, 5], [-112, -45, 5], [-104, -35, 3]]]);
-  k.add(M, exZ(tg, 10, { bevel: 0.8 }));
-  k.add(M, exZ(sh([[-98, B], [-166, B], [-166, -30, 3], [-98, -30, 3]], [[[-103, B - 1], [-161, B - 1], [-161, -31], [-103, -31]]]), 12, { bevel: 0.6 }));
-  for (const x of [-101, -163]) k.add("steelWorn", T2(cZ(2, -6.4, 6.4, { seg: 12 }), { p: [x, B - 2.2, 0] }));
-  k.add("lensBlack", T2(bx(18, 0.4, 7, { bevel: 0 }), { p: [-120, B - 1.2, 0] }));
+  k.add("rubber", G.extrudeZ([[-10, 26, 3], [-26, 25, 5], [-27, -95, 5], [-10, -96, 3]], 41, { bevel: 4 }));
+  for (let i = 0; i < 9; i++) k.add("rubber", G.T(G.box(2, 3, 38), { p: [-27, 16 - i * 13, 0] }));
+  for (const y of [8, -72]) k.add("steel", G.T(G.screwHead(2.4, 1), { r: [0, -90, 0], p: [-26.4, y, 0] }));
+  k.add("poly", G.extrudeZ([[112, -18, 2], [146, -16, 2], [146, -24, 3], [118, -26, 3]], 14, { bevel: 1.5 }));
+  k.add("steel", G.cylZ(1.6, -7.4, 7.4, { seg: 12, c: 0.3 }), { p: [140, -20, 0] });
+  for (let i = 0; i < 4; i++) k.add("poly", G.box(1.2, 1, 12, { bevel: 0.3 }), { p: [118 + i * 3.4, -25.6 + i * 0.28, 0] });
+  for (const s of [-1, 1]) {
+    k.add("steel", G.cylZ(5.5, 0, 2.6, { seg: 20, c: 0.5 }), { p: [14, -22, s > 0 ? 17 : -19.6] });
+    k.add("lensBlack", G.cylZ(3.2, 0, 0.6, { seg: 14 }), { p: [14, -22, s > 0 ? 19.4 : -20] });
+  }
+  return { root: k.build("hk_slim"), cheek: { x: 70, y: 25 } };
 }
-function svdCover(ctx, k) {
-  const { extrudeX: exX, T: T2, box: bx, cylX: cX } = ctx.G;
-  const arc = (w, y0, y1, r, n = 14) => {
-    const pts = [[w, y0]];
-    const cy = y1 - r;
-    pts.push([w, cy]);
-    for (let i = 1; i < n; i++) {
-      const a = i / n * Math.PI;
-      pts.push([Math.cos(a) * w, cy + Math.sin(a) * r]);
-    }
-    pts.push([-w, cy], [-w, y0]);
-    return pts;
+function stockCTR(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  k.add("poly", G.sideLoft([[-8, 24], [36, 22.5], [118, 20], [150, 17]], [[-8, -24], [30, -24], [92, -22], [150, -17]], { w: 36, k: 3.4, rings: 24 }));
+  k.add("poly", G.extrudeZ([[-8, 20, 3], [10, 20, 3], [10, -92, 4], [-8, -92, 4]], 34, { bevel: 4, curve: 6 }));
+  k.add("poly", G.extrudeZ([[2, -92, 3], [16, -92, 3], [106, -24, 5], [88, -18, 5], [2, -76, 4]], 28, { bevel: 4, curve: 6 }));
+  k.add("poly", G.T(G.cylX(19, 60, 150, { c: 3, seg: 28 }), { p: [0, 0, 0] }));
+  k.add("poly", G.extrudeZ([[96, -18, 2], [144, -18, 2], [144, -30, 3], [100, -28, 3]], 20, { bevel: 2 }));
+  k.add("steel", G.cylZ(3, -11, 11, { seg: 14 }), { p: [128, -26, 0] });
+  k.add("rubber", G.extrudeZ([[-8, 24, 3], [-22, 23, 4], [-22, -93, 4], [-8, -93, 3]], 38, { bevel: 3.5 }));
+  for (let i = 0; i < 10; i++) k.add("rubber", G.T(G.box(1.6, 2.6, 34), { p: [-22.2, 16 - i * 11.5, 0] }));
+  k.add("steel", G.wire([[20, -80, 0], [14, -99, 0], [-2, -99, 0], [-4, -84, 0]], 1.8, { n: 30 }));
+  return { root: k.build("ctr"), cheek: { x: 60, y: 23 } };
+}
+function stockSopmod(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  const pro = [[150, -17, 3], [150, 18, 4], [110, 28, 16], [-8, 30, 5], [-8, -90, 6], [110, -22, 26]];
+  k.add("poly", G.extrudeZ(pro, 34, { bevel: 4 }));
+  for (const s of [-1, 1]) {
+    k.add("poly", G.T(G.cylX(13, -6, 118, { c: 4, seg: 24 }), { p: [0, 12, s * 18] }));
+    k.add("poly", G.T(G.cylX(11.5, 118, 132, { c: 2, seg: 24 }), { p: [0, 12, s * 18] }));
+    k.add("steel", G.T(G.cylX(9, 130, 134, { c: 1, seg: 20 }), { p: [0, 12, s * 18] }));
+  }
+  k.add("poly", G.extrudeZ([[104, -20, 2], [146, -18, 2], [146, -27, 3], [110, -28, 3]], 18, { bevel: 2 }));
+  k.add("rubber", G.extrudeZ([[-8, 30, 3], [-24, 29, 4], [-24, -91, 5], [-8, -91, 3]], 60, { bevel: 4 }));
+  for (let i = 0; i < 10; i++) k.add("rubber", G.T(G.box(1.8, 2.6, 56), { p: [-24.2, 22 - i * 12, 0] }));
+  return { root: k.build("sopmod"), cheek: { x: 60, y: 30 } };
+}
+function stanagProfile(len, depth, curve, top = 48) {
+  const pts = [];
+  const off = (y) => y > -20 ? 0 : curve * Math.pow((-20 - y) / (len - 20), 1.6);
+  const n = 14;
+  for (let i = 0; i <= n; i++) {
+    const y = top - i / n * (top + len);
+    pts.push([-depth / 2 + off(y), y]);
+  }
+  for (let i = n; i >= 0; i--) {
+    const y = top - i / n * (top + len);
+    pts.push([depth / 2 + off(y), y]);
+  }
+  return { pts, off };
+}
+function magRounds(ctx, k, cal, top, x = -4, body = null, mat = "steelPark") {
+  if (body) ctx.C.feedLips(body, mat, -31, 2, 48, 11.5);
+  ctx.C.cartridge(k, cal, { p: [x - 26, top + 3.6, -2.6], r: [0, 0, -2] });
+  ctx.C.cartridge(k, cal, { p: [x - 26, top - 3.2, 2.6], r: [0, 0, -2] });
+}
+function stanag(ctx, o) {
+  const { G } = ctx;
+  const k = ctx.kit(), rk = ctx.kit();
+  const len = o.len, depth = 62, W = 23;
+  const { pts, off } = stanagProfile(len, depth, o.curve ?? 22);
+  k.add(o.mat, G.extrudeZ(pts.map((p) => [p[0], p[1], 0]), W, { bevel: o.bevel ?? 1.2 }));
+  const edge = (sx, ins) => {
+    const out = [];
+    for (let y = -6; y >= -len + 6; y -= 8) out.push([sx * (depth / 2 - ins) + off(y), y, 0]);
+    return out;
   };
-  const outer = arc(16.6, 12.4, 29, 12.5), inner = arc(15.2, 12.4, 27.6, 11.2).reverse();
-  k.add("steel", exX([...outer, ...inner.map((p) => [p[0], p[1]])], SV.REAR + 1, SV.FRONT - 2, { bevel: 0.3 }));
-  // у СВД крышка гладкая: только выштампованный пояс жёсткости у заднего упора и отбортовка по нижней кромке
-  k.add("steel", exX([...arc(17.1, 13.4, 29.5, 13), ...arc(16.5, 13.4, 28.9, 12.4).reverse()], SV.REAR + 14, SV.REAR + 24, { bevel: 0.6 }));
-  for (const s of [-1, 1]) k.add("steel", exX([[s * 16.4, 12.4], [s * 17.2, 12.4], [s * 17.2, 14.6], [s * 16.4, 14.6]], SV.REAR + 1, SV.FRONT - 2, { bevel: 0.2 }));
-  // упор крышки и кнопка
-  k.add("steelWorn", T2(cX(4.6, SV.REAR - 7, SV.REAR - 0.5, { c: 0.8, seg: 18 }), { p: [0, 18, 0] }));
-  k.add("steelBright", T2(cX(2.6, SV.REAR - 9.5, SV.REAR - 6, { c: 0.6, seg: 14 }), { p: [0, 18, 0] }));
-  k.add("steel", exX(arc(16.6, 12.4, 29, 12.5), SV.REAR - 1, SV.REAR + 2, { bevel: 0.5 }));
+  for (const sx of [-1, 1]) k.add(o.mat, G.wire(edge(sx, 1.4), 1.9, { n: 60, seg: 10 }));
+  if (o.ribs) {
+    const inner = stanagProfile(len - 18, depth - 18, (o.curve ?? 22) * 0.9, 30).pts;
+    for (const s of [-1, 1]) {
+      k.add(o.mat, G.extrudeZ(inner.map((p) => [p[0], p[1] - 8, 0]), 1, { bevel: 0.4, z: s * (W / 2 + 0.2) }));
+      k.add(o.mat, G.T(G.box(depth - 8, 2.2, 1.2, { bevel: 0.45 }), { p: [0, -8, s * (W / 2 + 0.3)] }));
+    }
+  }
+  if (o.texture) {
+    const rw = o.window ? depth - 26 : depth - 14, rx = o.window ? 7 : 1;
+    for (let i = 0; i < 7; i++) for (const s of [-1, 1]) {
+      const y = -24 - i * 5;
+      k.add(o.mat, G.T(G.box(rw, 1.5, 1, { bevel: 0.35 }), { p: [off(y) + rx, y, s * (W / 2 + 0.2)] }));
+    }
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) for (const s of [-1, 1]) {
+      const y = -len + 30 + r * 3.4, x = off(y) - 16 + c * 3.4;
+      k.add(o.mat, G.box(1.9, 1.9, 1, { bevel: 0.35 }), { p: [x, y, s * (W / 2 + 0.15)] });
+    }
+  }
+  k.add(o.follower || "polyTan", G.box(depth - 8, 3, W - 5), { p: [-2, o.top ?? 44, 0] });
+  const fy = -len, rot = [0, 0, -Math.atan(off(fy) / len) * 20];
+  const fp = o.texture ? [[-depth / 2 - 4, -4.5, 2], [depth / 2 + 6, -4.5, 2], [depth / 2 + 7, 1, 2], [depth / 2 + 1, 3.5, 1], [-depth / 2 - 1, 3.5, 1], [-depth / 2 - 5, 1, 2]] : [[-depth / 2 - 3, -3.5, 1.5], [depth / 2 + 4, -3.5, 1.5], [depth / 2 + 4, 3.5, 1], [-depth / 2 - 3, 3.5, 1]];
+  k.add(o.plate || o.mat, G.T(G.extrudeZ(fp, W + 4, { bevel: o.texture ? 2 : 1.4 }), { p: [off(fy) + 2, fy - 1.5, 0], r: rot }));
+  if (o.texture) for (let i = 0; i < 3; i++) for (const s of [-1, 1]) k.add(o.plate || o.mat, G.T(G.box(depth - 6, 0.9, 0.8, { bevel: 0.25 }), { p: [off(fy) + 2, fy - 3.4 + i * 1.9, s * (W / 2 + 2)], r: rot }));
+  else k.add(o.plate || o.mat, G.T(G.cylY(3, -0.6, 0.6, { seg: 14 }), { p: [off(fy) + 14, fy - 5.2, 0] }));
+  if (o.window) {
+    k.add("glassDark", G.box(7, 60, 1, { bevel: 0.3 }), { p: [-depth / 2 + 10, -20, W / 2 + 0.1] });
+    k.add(o.mat, G.extrudeZ(G.shape(G.rrect(-depth / 2 + 10, -20, 11, 64, 3), [G.rrect(-depth / 2 + 10, -20, 7.4, 60.4, 2)]), 1.2, { bevel: 0.35, z: W / 2 + 0.2 }));
+  }
+  magRounds(ctx, rk, o.cal || "556", 44, -4, k, o.lips || o.mat);
+  const rounds = rk.build("rounds");
+  return { root: G.node("mag", [k.build(), rounds]), mag: { cap: o.cap, rounds } };
 }
-// Антабка на вертлюге: бобышка с осью и подвижная скоба. side: ±1 — на борту (ось по Z), 0 — снизу (ось по Y).
-function svdSwivel(ctx, k, p, side, o = {}) {
-  const { T: T2, cylZ: cZ, cylY: cY, wire: wr } = ctx.G;
-  const [x, y, z] = p, w = o.w ?? 14, h = o.h ?? 15;
-  let y0 = y, zr = z;
-  if (side) {
-    k.add(o.mat || "steelWorn", T2(cZ(3.2, 0, 4, { seg: 14, c: 0.6 }), { p: [x, y, z], r: [0, side < 0 ? 180 : 0, 0] }));
-    zr = z + side * 4.6;
+function surefire60(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit(), rk = ctx.kit();
+  const { pts, off } = stanagProfile(150, 62, 10);
+  k.add("alu", G.extrudeZ(pts.map((p) => [p[0], p[1] > -20 ? p[1] : p[1], 0]).map((p) => p), 23, { bevel: 1.2 }));
+  const low = stanagProfile(150, 64, 10).pts.filter((p) => p[1] < -24).map((p) => [p[0], p[1], 0]);
+  k.add("alu", G.extrudeZ(low, 38, { bevel: 3 }));
+  k.add("alu", G.T(G.box(68, 8, 40, { bevel: 2 }), { p: [off(-150) + 2, -152, 0] }));
+  magRounds(ctx, rk, "556", 44, -4, k, "alu");
+  const rounds = rk.build("rounds");
+  return { root: G.node("mag", [k.build(), rounds]), mag: { cap: 60, rounds } };
+}
+function drum60(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit(), rk = ctx.kit();
+  const { pts } = stanagProfile(70, 62, 0);
+  k.add("poly", G.extrudeZ(pts.map((p) => [p[0], p[1], 0]), 23, { bevel: 1.2 }));
+  for (const s of [-1, 1]) {
+    k.add("poly", G.T(G.cylZ(58, 0, 34, { c: 4, seg: 40 }), { p: [8, -110, s > 0 ? 6 : -40] }));
+    k.add("polySoft", G.T(G.cylZ(20, 0, 3, { c: 1, seg: 28 }), { p: [8, -110, s > 0 ? 39 : -43] }));
+    k.add("glassDark", G.T(G.cylZ(9, 0, 1, { seg: 20 }), { p: [8, -110, s > 0 ? 42 : -44] }));
+  }
+  k.add("poly", G.T(G.box(20, 30, 12), { p: [8, -170, 0] }));
+  magRounds(ctx, rk, "556", 44, -4, k, "poly");
+  const rounds = rk.build("rounds");
+  return { root: G.node("mag", [k.build(), rounds]), mag: { cap: 60, rounds } };
+}
+function charger(ctx, kind) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  k.add("alu", G.extrudeX(G.rrect(0, 0, 11, 6, 1.5), -6, 40, { bevel: 0.6 }));
+  const wing = (z0, z1, ext) => G.extrudeY(G.shape([[-3, z0, 2], [-14 - ext, z0 + (z1 > z0 ? 0 : 0), 3], [-14 - ext, z1, 3], [-3, z1, 2]]), -4, 3, { bevel: 1 });
+  if (kind === "std") {
+    k.add("alu", G.extrudeY(G.shape([[0, -17, 2], [-13, -17, 4], [-13, 17, 4], [0, 17, 2]].map(([x, z, r]) => [x, z, r])), -4, 3, { bevel: 1 }));
+    k.add("alu", G.extrudeY(G.shape([[-4, -17], [-12, -17, 2], [-12, -24, 3], [-4, -22, 2]]), -4, 2.5, { bevel: 0.8 }));
+  } else if (kind === "raptor") {
+    k.add("alu", G.extrudeY(G.shape([[0, -14, 2], [-12, -14, 3], [-12, 14, 3], [0, 14, 2]]), -4, 3, { bevel: 1 }));
+    for (const s of [-1, 1]) k.add("poly", G.extrudeY(G.shape([[-2, s * 12], [-18, s * 13, 4], [-18, s * 32, 6], [-6, s * 30, 5]]), -5, 4, { bevel: 1.4 }));
   } else {
-    k.add(o.mat || "steelWorn", T2(cY(3.4, -5, 0, { seg: 14, c: 0.6 }), { p: [x, y, z] }));
-    k.add("steelWorn", T2(cZ(1.4, -4, 4, { seg: 10 }), { p: [x, y - 3, z] }));
-    y0 = y - 3;
+    k.add("alu", G.extrudeY(G.shape([[0, -17, 2], [-13, -17, 4], [-13, 17, 4], [0, 17, 2]]), -4, 3, { bevel: 1 }));
+    k.add("alu", G.extrudeY(G.shape([[-3, -16], [-16, -17, 3], [-17, -34, 6], [-6, -30, 5]]), -5, 3, { bevel: 1.2 }));
   }
-  const loop = [[x - w / 2, y0], [x - w / 2, y0 - h * 0.6], [x - w * 0.28, y0 - h], [x + w * 0.28, y0 - h], [x + w / 2, y0 - h * 0.6], [x + w / 2, y0]];
-  k.add("steelWorn", wr(loop.map(([a, b]) => [a, b, zr]), 1.3, { closed: true, n: 48, seg: 7 }));
+  return { root: k.build("charger"), charger: { travel: 64 } };
 }
-function svdBarrel(ctx, k, o) {
-  const { latheX: lX, extrudeX: exX, extrudeZ: exZ, T: T2, box: bx, cylX: cX, cylY: cY, cylZ: cZ, shape: sh } = ctx.G;
-  const { FRONT: F, MUZZLE: MZ, GAS_Y: GY, GAS_R: GR, SIGHT_Y: SY, REAR_X: RX, FRONT_X: FX } = SV;
-  const M = "steel";
-  k.add(M, lX([[F - 6, 0], [F - 6, 13.4], [106, 13.4], [110, 12], [250, 11], [400, 10], [446, 9.4], [580, 9], [596, 9], [598, 7.4], [MZ, 7.4], [MZ, 3.4], [MZ - 5, 3.4], [MZ - 5, 0]], { seg: 36 }));
-  // колодка прицела (как у АК, но выше) и секторный целик
-  k.add(M, exZ([[F - 2, 6], [104, 6], [104, 30, 2], [96, 38, 3], [40, 40, 3], [F - 2, 35, 2]], 26, { bevel: 1.4 }));
-  // ушки шарнира планки, пружина планки и штифт колодки
-  for (const s of [-1, 1]) k.add(M, exZ([[RX - 36, 36], [RX - 22, 36], [RX - 24, 43, 2], [RX - 34, 43, 2]], 2.2, { bevel: 0.4, z: s * 9.8 }));
-  k.add("steelWorn", T2(cZ(1.8, -11.2, 11.2, { seg: 12 }), { p: [RX - 29, 40.4, 0] }));
-  k.add("spring", exZ([[RX - 20, 39.8], [RX + 20, 38.4], [RX + 20, 39.2], [RX - 20, 40.6]], 8, { bevel: 0.2 }));
-  for (const s of [-1, 1]) k.add("steelWorn", T2(cZ(2, 0, 0.8, { seg: 12 }), { p: [F + 18, 20, s > 0 ? 12.8 : -13.6] }));
-  const leaf = ctx.kit();
-  leaf.add(M, exZ([[RX - 30, 39.4], [RX + 28, 37], [RX + 28, 39.4], [RX - 24, 42.4, 2], [RX - 30, 42.8]], 17, { bevel: 0.5 }));
-  const notch = [[-8.5, 38.4, 1], [8.5, 38.4, 1], [8.5, SY, 0.8], [1.5, SY, 0.2], [1.2, SY - 2.4, 0.5], [-1.2, SY - 2.4, 0.5], [-1.5, SY, 0.2], [-8.5, SY, 0.8]];
-  leaf.add(M, exX(notch, RX - 2, RX + 1.4, { bevel: 0.3 }));
-  leaf.add("steelWorn", exZ([[RX + 2, 38.6], [RX + 14, 38], [RX + 14, 44.5, 1], [RX + 2, 45.2, 1]], 20, { bevel: 0.8 }));
-  // кнопки защёлки хомутика по бокам и его рифление сверху
-  for (const s of [-1, 1]) leaf.add("steelWorn", T2(bx(6, 4.4, 2.6, { bevel: 0.8 }), { p: [RX + 8, 41.6, s * 11] }));
-  for (let i = 0; i < 4; i++) leaf.add("steel", T2(bx(0.8, 0.6, 18, { bevel: 0.2 }), { p: [RX + 4 + i * 2.6, 45.1 - i * 0.12, 0] }));
-  for (let i = 0; i < 10; i++) leaf.add("paintWhite", T2(bx(0.6, 0.2, 3), { p: [RX - 22 + i * 5, 42.1 - i * 0.28, 5] }));
-  const leafNode = leaf.build("rearLeaf");
-  // газовая трубка, газовая камора с двухпозиционным регулятором, толкатель
-  k.add(M, T2(cX(GR, 100, 410, { c: 0.8, seg: 24 }), { p: [0, GY, 0] }));
-  k.add(M, exZ([[404, -13, 4], [438, -13, 4], [438, 12, 2], [432, 36, 4], [408, 36, 3], [404, 26]], 24, { bevel: 1.6 }));
-  k.add(M, T2(cX(11.5, 398, 440, { c: 1.2, seg: 28 }), { p: [0, GY, 0] }));
-  k.add("steelWorn", T2(lX([[440, 0], [440, 10.2], [449, 10.2], [451, 8.6], [451, 0]], { seg: 24 }), { p: [0, GY, 0] }));
-  k.add("lensBlack", T2(bx(0.8, 14, 2.4, { bevel: 0 }), { p: [451.1, GY, 0] }));
-  for (const a of [-40, 40]) k.add("steelWorn", T2(bx(3, 1.4, 1.6, { bevel: 0.3 }), { p: [445, GY + 10.4, 0], r: [a, 0, 0] }));
-  k.add("steelWorn", T2(cZ(4, 12, 15.5, { seg: 6 }), { p: [428, GY, 0] }));
-  k.add("steelWorn", T2(exZ([[0, 0], [12, 0], [12, 3], [0, 3]], 2, { bevel: 0.3 }), { p: [424, GY + 2, 15.4] }));
-  for (const x of [412, 430]) k.add("steelWorn", T2(cZ(2.2, -12.5, 12.5, { seg: 12, c: 0.3 }), { p: [x, -3, 0] }));
-  // передняя антабка — слева на газовой каморе
-  svdSwivel(ctx, k, [421, -6, -12], -1, { w: 16 });
-  // основание мушки (напрессовано, два конических штифта), закрытый намушник с отверстием для ключа, упор штыка
-  k.add(M, exZ([[FX - 34, -13, 3], [FX + 12, -13, 3], [FX + 12, 12, 2], [FX + 4, 19, 3], [FX - 26, 19, 3], [FX - 34, 10, 2]], 26, { bevel: 1.4 }));
-  for (const x of [FX - 24, FX + 2]) k.add("steelWorn", T2(cZ(2, -13.3, 13.3, { seg: 12, c: 0.3 }), { p: [x, -5, 0] }));
-  const HC = SY - 2, hood = (r, y0) => {
-    const pts = [[r, y0]];
-    for (let i = 0; i <= 18; i++) {
-      const a = i / 18 * Math.PI;
-      pts.push([Math.cos(a) * r, HC + Math.sin(a) * r]);
-    }
-    pts.push([-r, y0]);
-    return pts;
-  };
-  k.add(M, exX(sh(hood(11, 16), [hood(8.6, 20.5).reverse()]), FX - 8, FX + 6, { bevel: 0.8 }));
-  k.add("lensBlack", T2(cY(1.9, HC + 10.4, HC + 11.2, { seg: 14 }), { p: [FX - 1, 0, 0] }));
-  k.add("steelWorn", T2(bx(10, 0.6, 1.2, { bevel: 0 }), { p: [FX - 1, 19.2, 13.2] }));
-  k.add(M, exZ([[FX - 1.2, 16], [FX + 1.2, 16], [FX + 1.2, SY - 2], [FX + 0.9, SY, 0.3], [FX - 0.9, SY, 0.3], [FX - 1.2, SY - 2]], 2.4, { bevel: 0.2 }));
-  if (o.bayonet) {
-    k.add(M, exZ([[FX - 30, -12], [FX + 6, -12], [FX + 6, -25, 3], [FX - 22, -25, 3]], 12, { bevel: 1 }));
-    for (const s of [-1, 1]) k.add("lensBlack", T2(bx(26, 2.2, 0.3, { bevel: 0 }), { p: [FX - 8, -19, s * 6.05] }));
+var M416_PARTS = [
+  { id: "hk_quad", cat: "hg", name: "HK416 Quad Rail", desc: "Штатное цевьё с четырьмя планками Пикатинни", fit: { iface: ["hk416"] }, stats: { weight: 330, ergo: 0 }, build: quadRail },
+  { id: "hk_mlok", cat: "hg", name: 'Цевьё M-LOK 10,5"', desc: "Облегчённое, верхняя планка + секции M-LOK", fit: { iface: ["hk416"] }, stats: { weight: 210, ergo: 6, length: 10 }, build: mlokRail },
+  { id: "hk_fh", cat: "muzzle", name: "HK пламегаситель", desc: "Штатный щелевой пламегаситель", fit: { thread: ["1/2x28"] }, stats: { weight: 60, length: 44, flash: -45, loud: 0 }, build: hkFlashHider },
+  { id: "hk_diopter", cat: "rearsight", name: "HK диоптр (складной)", desc: "Барабан с четырьмя диоптрами 200–500 м", foot: [-15, 15], body: [-15, 15], stats: { weight: 80 }, build: hkDiopter },
+  { id: "hk_front", cat: "frontsight", name: "HK мушка (складная)", desc: "Мушка в кольцевом намушнике, тритий", foot: [-11, 11], body: [-11, 11], stats: { weight: 60 }, build: hkFront },
+  { id: "hk_slim", cat: "stock", name: "HK A5 Slimline", desc: "Штатный 6-позиционный приклад", mountTypes: ["stock"], fit: { iface: ["ar"] }, body: [-40, 150], stats: { weight: 260, ergo: 0, "recoilV%": 0 }, build: stockHkSlim },
+  { id: "ctr", cat: "stock", name: "Magpul CTR", desc: "Лёгкий, фрикционный фиксатор без люфта", mountTypes: ["stock"], fit: { iface: ["ar"] }, body: [-30, 150], stats: { weight: 230, ergo: 4, "recoilV%": 2 }, build: stockCTR },
+  { id: "sopmod", cat: "stock", name: "B5 SOPMOD", desc: "Широкая щека, отсеки под батареи", mountTypes: ["stock"], fit: { iface: ["ar"] }, body: [-30, 150], stats: { weight: 330, ergo: -2, "recoilV%": -6 }, build: stockSopmod },
+  { id: "hk_steel30", cat: "mag", name: "HK Steel 30", desc: "Стальной магазин HK на 30 патронов", fit: { iface: ["stanag"] }, stats: { weight: 470, mag: 30 }, build: (c) => stanag(c, { len: 128, mat: "steelPark", ribs: true, cap: 30, follower: "polyTan" }) },
+  { id: "pmag30", cat: "mag", name: "Magpul PMAG 30 Gen M3", desc: "Полимер, 30 патронов", fit: { iface: ["stanag"] }, stats: { weight: 420, mag: 30, ergo: 1 }, build: (c) => stanag(c, { len: 128, mat: "poly", texture: true, cap: 30, follower: "polyGrey", bevel: 1.6 }) },
+  { id: "pmag30w", cat: "mag", name: "PMAG 30 с окном", desc: "Окно контроля остатка", fit: { iface: ["stanag"] }, stats: { weight: 425, mag: 30 }, build: (c) => stanag(c, { len: 128, mat: "polyFde", texture: true, cap: 30, window: true, follower: "polyGrey", bevel: 1.6 }) },
+  { id: "pmag40", cat: "mag", name: "Magpul PMAG 40", desc: "Удлинённый, 40 патронов", fit: { iface: ["stanag"] }, stats: { weight: 560, mag: 40, ergo: -3, adsTime: 10 }, build: (c) => stanag(c, { len: 168, curve: 22, mat: "poly", texture: true, cap: 40, follower: "polyGrey", bevel: 1.6 }) },
+  { id: "sf60", cat: "mag", name: "SureFire MAG5-60", desc: "Четырёхрядный, 60 патронов", fit: { iface: ["stanag"] }, stats: { weight: 800, mag: 60, ergo: -6, adsTime: 20 }, build: surefire60 },
+  { id: "d60", cat: "mag", name: "Magpul D-60", desc: "Барабан на 60 патронов", fit: { iface: ["stanag"] }, stats: { weight: 1100, mag: 60, ergo: -9, adsTime: 30 }, build: drum60 },
+  { id: "ch_std", cat: "charger", name: "Штатная рукоять", desc: "Mil-spec, защёлка слева", fit: { iface: ["ar"] }, stats: { weight: 30 }, build: (c) => charger(c, "std") },
+  { id: "ch_bcm", cat: "charger", name: "BCM Gunfighter Mod 4", desc: "Увеличенная защёлка", fit: { iface: ["ar"] }, stats: { weight: 36, ergo: 2 }, build: (c) => charger(c, "bcm") },
+  { id: "ch_raptor", cat: "charger", name: "Radian Raptor", desc: "Двусторонняя, удобна с оптикой", fit: { iface: ["ar"] }, stats: { weight: 40, ergo: 3 }, build: (c) => charger(c, "raptor") }
+];
+
+// src/weapons/m416.js
+var RAIL_TOP2 = 30.5;
+function upperReceiver(ctx, k) {
+  const { G } = ctx;
+  const sec = [[14.5, -13, 1], [14.5, 7, 1], [13.4, 10.2, 1], [11, 15, 2], [-11, 15, 2], [-13.4, 10.2, 1], [-14.5, 7, 1], [-14.5, -13, 1]];
+  const rB = 12.4, yT = 5, yB = -8;
+  const port = [[14.5, yT], [14.5, 7], [13.4, 10.2], [11, 15], [-11, 15], [-13.4, 10.2], [-14.5, 7], [-14.5, -13], [14.5, -13], [14.5, yB]];
+  const a0 = Math.atan2(yB, Math.sqrt(rB * rB - yB * yB)), a1 = Math.atan2(yT, Math.sqrt(rB * rB - yT * yT)) - Math.PI * 2;
+  for (let i = 0; i <= 28; i++) {
+    const a = a0 + (a1 - a0) * (i / 28);
+    port.push([Math.cos(a) * rB, Math.sin(a) * rB]);
   }
-  k.add("steelWorn", T2(cX(3, 300, FX - 32, { c: 0.6, seg: 12 }), { p: [0, -15, 0] }));
-  return leafNode;
+  k.add("alu", G.extrudeX(sec, -142, -58.8, { bevel: 0.8 }));
+  k.add("alu", G.extrudeX(port, -60, 8, { bevel: 0.25 }));
+  k.add("alu", G.extrudeX(sec, 6.8, 38, { bevel: 0.8 }));
+  const r = G.picatinny(178, { base: RAIL_TOP2 - 14.5 });
+  k.add("alu", r.geo, { p: [-141, RAIL_TOP2, 0] });
+  k.add("steelWorn", railMarks(ctx, r, 1), { p: [-141, RAIL_TOP2, 0] });
+  k.add("alu", G.extrudeX([[-9, -13, 1], [9, -13, 1], [9, -4, 2], [-9, -4, 2]], -150, -140, { bevel: 0.6 }));
+  k.add("alu", G.extrudeY([[-80, 14.2], [-60, 14.2], [-60.5, 17.6, 1.5], [-65, 21, 3], [-74, 20, 6]], -3.5, 12.5, { bevel: 1.6 }));
+  const rings = [];
+  for (let i = 0; i <= 10; i++) {
+    const t = i / 10;
+    rings.push({ x: -129 + 52 * t, pts: G.superEllipse(11.5 * Math.pow(1 - t, 1.25) + 0.8, 6.9 - 3.4 * t, 2.6, 28, 5 + t, 14.2) });
+  }
+  k.add("alu", G.loftX(rings, { flip: true, crease: 50 }));
+  const fa = { r: [0, 12, 0], p: [-130, 5, 19.5] };
+  k.add("alu", G.T(G.latheX([[0, 0], [0, 6.4], [0.8, 7.2], [14, 7.2], [18, 6], [18, 0]], { seg: 28 }), fa));
+  const btn = [G.cylX(5.4, -8.6, 0.5, { c: 0.7, seg: 24 }), G.ringGrooves(5.5, -6.5, -1.5, 3, 0.35, { seg: 24 })];
+  for (let i = -2; i <= 2; i++) {
+    const y = i * 2.05, c = Math.sqrt(4.9 * 4.9 - y * y);
+    btn.push(G.T(G.box(0.9, 1, c * 2, { bevel: 0.2 }), { p: [-8.8, y, 0] }));
+  }
+  for (const g of btn) k.add("steel", G.T(g, fa));
+  k.add("steel", G.pin(2.2, 30), { p: [-122, -8, 0] });
+  for (const [a, b] of [[-64, -60.4], [8.4, 12]]) k.add("alu", G.cylX(2.4, a, b, { c: 0.4, seg: 16 }), { p: [0, -9.5, 15.5] });
+  for (const x of [22, 32]) k.pair("steel", G.screwHead(2.6, 1.2), { p: [x, -7.5, 14.4] });
+  return { railFirst: -141 + r.first, railSlots: r.slots };
 }
-function svdTrigger(ctx, nodes) {
-  const { extrudeZ: exZ, node: nd, cylZ: cZ, T: T2, box: bx } = ctx.G;
-  const t = ctx.kit();
-  t.add("steel", exZ([[-2, 3], [3, 3], [3, -6, 2], [0, -17, 4], [-5, -23, 2], [-7, -21], [-3, -8, 3]], 6, { bevel: 0.9 }));
-  nodes.trigger = nd("trigger", [t.build()], { p: [-118, -20, 0] });
-  // флажок-предохранитель АК-типа на правом борту, ось у заднего торца
-  const s = ctx.kit();
-  // длина как у АК: в положении «огонь» перо не заходит на магазин
-  s.add("steel", exZ([[-4, -4, 2], [120, 1, 2], [126, 4, 2], [126, 12, 2], [116, 13, 2], [4, 6, 3], [-4, 4, 2]], 1.8, { bevel: 0.4, z: 16.9 }));
-  s.add("steel", exZ([[116, 4], [126, 4], [128, -4, 2], [118, -4, 2]], 3, { bevel: 0.8, z: 17.6 }));
-  for (let i = 0; i < 3; i++) s.add("steel", T2(bx(0.8, 7, 0.8, { bevel: 0.2 }), { p: [119 + i * 2.6, 0, 19.2] }));
-  s.add("steel", cZ(5.5, 15.5, 18, { seg: 20 }));
-  s.add("steelWorn", T2(cZ(2.4, 17.6, 18.6, { seg: 12 }), {}));
-  nodes.selector = nd("selector", [s.build()], { p: [-214, 2, 0] });
+function bullet(G, x, y, s = 1) {
+  return G.T(G.extrudeZ([[-0.7, -1.8], [0.7, -1.8], [0.7, 0.5], [0, 1.8], [-0.7, 0.5]].map(([u, v]) => [u * s, v * s]), 0.16, { bevel: 0.04 }), { p: [x, y, 0] });
+}
+function lowerReceiver(ctx, k, nodes) {
+  const { G } = ctx;
+  const body = [[-150, -13], [30, -13], [30, -24], [-40, -24], [-42, -40, 2], [-118, -40], [-124, -44, 2], [-150, -44, 3], [-156, -30, 6], [-156, -13]];
+  k.add("alu", G.extrudeZ(body, 24, { bevel: 1.6 }));
+  const well = G.shape(G.rrect(-6, 0, 74, 31, 3), [G.rrect(-6, 0, 67, 25, 2)]);
+  k.add("alu", G.extrudeY(well, -60, -14, { bevel: 0.8 }));
+  const flare = G.shape(G.rrect(-5, 0, 80, 35, 5), [G.rrect(-6, 0, 67, 25, 2)]);
+  k.add("alu", G.extrudeY(flare, -65, -58, { bevel: 1.4 }));
+  for (let i = 0; i < 12; i++) k.add("alu", G.box(1.4, 1.3, 24, { bevel: 0.4 }), { p: [31.1, -21 - i * 3, 0] });
+  k.add("steelWorn", engrave(ctx, "HK416 A5", { h: 4.2, basis: "left", p: [-6, -29, -15.47] }));
+  k.add("steelWorn", engrave(ctx, "5,56MM X45", { h: 2.6, basis: "left", p: [-6, -38, -15.47] }));
+  k.add("steelWorn", engrave(ctx, "HK 21-09734", { h: 2.2, basis: "right", p: [-6, -44, 15.47] }));
+  k.add("alu", G.extrudeZ([[26, -13], [44, -13], [44, -20, 4], [38, -26, 4], [26, -26]], 22, { bevel: 1.2 }));
+  const tg = G.shape(
+    [[-42, -38], [-44, -54, 4], [-53, -62, 6], [-110, -58, 8], [-122, -46, 4], [-122, -38]],
+    [[[-50, -40], [-50, -51, 3], [-58, -56, 5], [-106, -52, 6], [-114, -44, 3], [-114, -40]]]
+  );
+  k.add("alu", G.extrudeZ(tg, 13, { bevel: 2 }));
+  k.add("alu", G.extrudeZ([[-50, -16], [-38, -16], [-38, -34, 3], [-50, -34, 3]], 3, { bevel: 0.8, z: 13 }));
+  k.add("steel", G.cylZ(5.2, 12, 15.2, { c: 0.6, seg: 24 }), { p: [-44, -25, 0] });
+  for (const y of [-27, -25, -23]) k.add("steel", G.box(7, 0.8, 0.8, { bevel: 0.2 }), { p: [-44, y, 15.4] });
+  k.add("steel", G.extrudeZ([[-38, -33.5, 1], [-38, -36, 1], [-51, -37, 1.5], [-54.5, -43.5, 1.5], [-58.5, -43, 1.5], [-57, -34, 2]], 1.8, { bevel: 0.5, z: 12.9 }));
+  for (const y of [-39.5, -41.5]) k.add("steel", G.box(4, 0.6, 0.6, { bevel: 0.15 }), { p: [-56.2, y, 14] });
+  k.add("alu", G.extrudeZ([[-61, -14], [-43, -14], [-43, -22, 2], [-50, -25, 3], [-61, -21, 2]], 2.4, { bevel: 0.7, z: -12.6 }));
+  k.add("steel", G.extrudeZ([[-60, -15, 1], [-46, -15, 1], [-44.5, -18, 1], [-47.5, -33, 2.5], [-57, -33.5, 2.5], [-59, -26, 1.5]], 2.2, { bevel: 0.6, z: -14.5 }));
+  for (const y of [-26, -28.2, -30.4]) k.add("steel", G.box(9, 0.7, 0.7, { bevel: 0.2 }), { p: [-52.4, y, -15.7] });
+  k.add("steel", G.cylZ(1.6, -15.9, -13, { seg: 12, c: 0.2 }), { p: [-53, -17.5, 0] });
+  k.add("steel", G.extrudeZ([[-52, -35], [-41, -35], [-40, -38, 1], [-51, -39.5, 1.5]], 1.8, { bevel: 0.5, z: -12.9 }));
+  const pinHead = G.latheX([[0, 0], [0, 4.6], [0.4, 5], [1.2, 5], [1.5, 4.3], [2, 4.3], [2.3, 3.7], [2.3, 0]], { seg: 24 });
+  for (const [x, y] of [[36, -18], [-138, -18]]) {
+    k.add("steel", G.cylZ(3.2, -12.25, 12.1, { c: 0.35, seg: 20 }), { p: [x, y, 0] });
+    k.add("steel", G.T(pinHead.clone(), { r: [0, -90, 0], p: [x, y, 11.8] }));
+  }
+  for (const [x, y] of [[-74, -34], [-86, -21]]) k.add("steel", G.cylZ(2.4, -12.2, 12.2, { c: 0.3, seg: 16 }), { p: [x, y, 0] });
+  const SX = -106, SY = -28;
+  for (const side of [1, -1]) {
+    const add = (mat, g) => k.add(mat, side > 0 ? G.T(g, { p: [0, 0, 12.02] }) : G.T(G.mirrorZ(g), { p: [0, 0, -12.02] }));
+    add("paintWhite", bullet(G, SX + 12, SY));
+    add("paintWhite", G.T(G.box(5.4, 0.45, 0.16, { bevel: 0 }), { r: [0, 0, 55], p: [SX + 12, SY, 0] }));
+    add("paintRed", bullet(G, SX, SY + 10.6, 0.9));
+    for (const dx of [-1.9, 0, 1.9]) add("paintRed", bullet(G, SX - 12.5 + dx, SY, 0.75));
+  }
+  k.add("alu", G.T(G.cylX(17, -158, -142, { c: 1.5, seg: 32 }), { p: [0, 1, 0] }));
+  k.add("steel", G.T(G.cylX(17.4, -168, -159, { c: 0.8, seg: 32 }), { p: [0, 1, 0] }));
+  k.add("steel", G.T(G.flutesX(17, -166.5, -160.5, 8, 5, 2.4), { p: [0, 1, 0] }));
+  k.add("steel", G.T(G.latheX([[-172, 0], [-172, 17], [-168, 19], [-168, 0]], { seg: 32 }), { p: [0, 1, 0] }));
+  for (const s of [-1, 1]) {
+    k.add("steel", G.cylZ(6, 0, 7, { c: 0.8, seg: 20 }), { p: [-166, 1, s > 0 ? 17 : -24] });
+    k.add("lensBlack", G.cylZ(3.6, 0, 1, { seg: 16 }), { p: [-166, 1, s > 0 ? 23.6 : -24.6] });
+  }
+  k.add("alu", G.T(G.cylX(14.6, -338, -160, { c: 1.2, seg: 32 }), { p: [0, 1, 0] }));
+  k.add("alu", G.extrudeX(G.rrect(0, -14.5, 9, 6, 1.5), -330, -168, { bevel: 0.6 }), { p: [0, 1, 0] });
+  for (let i = 0; i < 6; i++) k.add("lensBlack", G.cylY(2, -1, 1, { seg: 12 }), { p: [-228 - i * 16, -16.5, 0] });
+  const tk = ctx.kit();
+  tk.add("steel", G.extrudeZ([[-3, 4], [3, 4], [3, -6, 2], [0, -16, 4], [-6, -22, 2], [-7.5, -20], [-3, -9, 3]], 6, { bevel: 1 }));
+  tk.add("steel", G.cylZ(2.9, -3.4, 3.4, { seg: 16, c: 0.3 }));
+  nodes.trigger = G.node("trigger", [tk.build()], { p: [-74, -34, 0] });
+  const sk = ctx.kit();
+  sk.add("steel", G.extrudeZ([[0, -4.2, 2], [13.5, -3, 2.5], [15.5, 0, 1.2], [13.5, 3, 2.5], [0, 4.2, 2]], 2.6, { bevel: 0.8, z: -13.7 }));
+  sk.add("steel", G.extrudeZ([[0, -3.5, 2], [9.5, -2.6, 2], [10.5, 0, 1], [9.5, 2.6, 2], [0, 3.5, 2]], 2.4, { bevel: 0.6, z: 13.6 }));
+  for (const x of [9, 11, 13]) sk.add("steel", G.box(0.7, 5.2 - (x - 9) * 0.5, 0.6, { bevel: 0.2 }), { p: [x, 0, -15.1] });
+  for (const x of [6.5, 8.3]) sk.add("steel", G.box(0.7, 4.4, 0.6, { bevel: 0.2 }), { p: [x, 0, 14.9] });
+  sk.add("steel", G.cylZ(5.4, -15.2, 15, { c: 0.6, seg: 24 }));
+  nodes.selector = G.node("selector", [sk.build()], { p: [SX, SY, 0] });
   return [nodes.trigger, nodes.selector];
 }
-function svdCarrier(ctx) {
-  const { extrudeX: exX, extrudeY: exY, extrudeZ: exZ, T: T2, box: bx, cylX: cX, cylZ: cZ, latheX: lX, shape: sh, node: nd, rrect: rr } = ctx.G;
-  const k = ctx.kit();
-  k.add("steelBright", exX(rr(0, 12, 22, 15, 3), -170, 6, { bevel: 1 }));
-  k.add("steelWorn", cX(9, -40, 0, { c: 0.8, seg: 24 }));
-  // в окне выброса: боевой упор затвора, выбрасыватель, фигурный паз рамы и головка ударника
-  k.add("steelBright", T2(bx(9, 6, 4, { bevel: 0.9 }), { p: [-6, 1.5, 7.6] }));
-  k.add("steelWorn", exZ([[-34, 1.6], [-4, 1.6], [-1.4, 4.8, 1], [-34, 5.2]], 2, { bevel: 0.4, z: 9.4 }));
-  k.add("steelWorn", T2(cZ(1.1, 9.6, 10.8, { seg: 10 }), { p: [-26, 3.4, 0] }));
-  k.add("lensBlack", T2(bx(26, 1.4, 0.5, { bevel: 0 }), { p: [-28, 10.4, 11.05], r: [0, 0, 18] }));
-  k.add("steel", T2(bx(80, 2, 0.6, { bevel: 0.2 }), { p: [-120, 17.6, 11.1] }));
-  // рукоять рамы — массивная, справа
-  const hx = -96;
-  k.add("steelBright", exY(sh([[hx - 16, 10], [hx + 18, 10], [hx + 8, 22, 3], [hx - 12, 24, 3]]), 4, 11, { bevel: 0.8 }));
-  k.add("steelBright", T2(cZ(4, 18, 28, { seg: 16 }), { p: [hx - 2, 7.5, 0] }));
-  k.add("steelBright", T2(lX([[0, 0], [0, 6.2], [2.4, 7.6], [9, 7.6], [12, 5.2], [13, 0]], { seg: 22 }), { r: [0, -90, 0], p: [hx - 2, 7.5, 27] }));
-  return nd("carrier", [k.build()]);
+function barrel(ctx, k) {
+  const { G } = ctx;
+  k.add("steel", G.latheX([[38, 0], [38, 12], [60, 12], [61, 10.4], [250, 10.4], [252, 9.6], [354.5, 9.6], [355.5, 8.6], [357, 8.2], [357, 0]], { seg: 32 }));
+  k.add("steel", G.ringGrooves(6.3, 357, 366.8, 11, 0.35, { seg: 24 }));
+  k.add("steel", G.latheX([[366.6, 0], [366.6, 6.1], [368, 5.3], [368, 3.2], [367.2, 2.8], [362, 2.8], [362, 0]], { seg: 24 }));
+  k.add("steel", G.extrudeX([[-13, -10.5, 5], [13, -10.5, 5], [13, 10, 3], [8, 19, 4], [-8, 19, 4], [-13, 10, 3]], 258, 286, { bevel: 1.2 }));
+  k.add("steel", G.T(G.cylX(7, 238, 262, { seg: 20 }), { p: [0, 14, 0] }));
+  for (const x of [264, 280]) k.add("steel", G.pin(2, 27.2), { p: [x, -5, 0] });
+  k.add("steel", G.T(ctx.C.knob(5.5, 4, 16), { r: [0, 90, 0], p: [272, 12, -12.6] }));
 }
-function svdBase(ctx) {
-  const { node: nd } = ctx.G;
+function carrierGroup(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  k.add("steelPark", G.latheX([[-190, 0], [-190, 11.2], [-186, 12], [-60, 12], [-58, 11], [-44, 11], [-42, 12], [-6, 12], [-5, 10], [-5, 0]], { seg: 32 }));
+  k.add("steelPark", G.extrudeX(G.rrect(0, 12.5, 9, 6, 1.5), -150, -20, { bevel: 0.6 }));
+  for (const x of [-35, -26]) k.add("lensBlack", G.T(G.cylZ(1.5, 0, 1, { seg: 14 }), { s: [1.9, 1, 1], p: [x, 3.5, 11.3] }));
+  k.add("steelWorn", G.box(7, 3, 6, { bevel: 0.6 }), { p: [-32, 12.4, 0] });
+  k.add("steelWorn", G.latheX([[-6, 0], [-6, 8.2], [4, 8.2], [4.6, 7.4], [4.6, 0]], { seg: 20 }));
+  for (let i = 0; i < 7; i++) k.add("steelWorn", G.T(G.box(4, 3, 3.6, { bevel: 0.4 }), { p: [2.8, 9, 0], r: [i * 51.4, 0, 0] }));
+  k.add("steel", G.extrudeZ([[-18, 6], [2, 6], [3, 8.2, 0.6], [2, 9.5], [-18, 9.5]], 3, { bevel: 0.5, z: 7.2 }));
+  k.add("steel", G.cylZ(0.9, 6.5, 9.6, { seg: 10 }), { p: [-12, 7.8, 0] });
+  return G.node("carrier", [k.build()]);
+}
+function dustCover(ctx) {
+  const { G } = ctx;
+  const k = ctx.kit();
+  k.add("steelPark", G.extrudeZ([[-60, 1.2, 1], [8, 1.2, 1], [8, 15, 1.5], [-60, 15, 1.5]], 1.4, { bevel: 0.4, z: -0.2 }));
+  k.add("steelPark", G.extrudeZ([[-54, 4.6, 3], [-3.5, 4.6, 3], [-3.5, 11.6, 3], [-54, 11.6, 3]], 1.2, { bevel: 0.45, z: 0.6 }));
+  for (const [a, b] of [[-59.8, -33], [-23, 7.8]]) k.add("steelPark", G.tubeX(2.1, 1.45, a, b, { seg: 16, c: 0.4 }));
+  k.add("steel", G.cylX(1.4, -64.5, 12.6, { seg: 12, c: 0.3 }));
+  k.add("steel", G.tubeX(2, 1.3, 12.6, 13.4, { seg: 14, c: 0.2 }));
+  k.add("steel", G.T(G.latheX([[0, 0], [0, 2.2], [0.5, 2.2], [0.9, 1.4], [0.9, 0]], { seg: 16 }), { r: [0, -90, 0], p: [-57, 12.4, 0.45] }));
+  return G.node("dustCover", [k.build()], { p: [0, -9.5, 15.5] });
+}
+function build(ctx) {
+  const { G, THREE: THREE9 } = ctx;
   const k = ctx.kit();
   const nodes = {};
-  svdReceiver(ctx, k);
-  svdCover(ctx, k);
-  const leaf = svdBarrel(ctx, k, { bayonet: true });
-  const trg = svdTrigger(ctx, nodes);
+  const up = upperReceiver(ctx, k);
+  const lowerNodes = lowerReceiver(ctx, k, nodes);
+  barrel(ctx, k);
   const body = k.build("receiver");
-  nodes.carrier = svdCarrier(ctx);
-  const root = nd("svd", [body, leaf, nodes.carrier, ...trg]);
-  const { mount: mount2 } = ctx;
-  root.add(mount2({ id: "hg", type: "hg", p: [0, 0, 0] }));
-  root.add(mount2({ id: "dovetail", type: "dovetail", p: [-118, -2, -19], slots: 1, axis: "side" }));
-  root.add(mount2({ id: "muzzle", type: "thread", p: [SV.MUZZLE - 16, 0, 0] }));
-  root.add(mount2({ id: "magwell", type: "magwell", p: [SV.MAG_X, SV.BOTTOM, 0], rock: [0, 0, 16] }));
-  root.add(mount2({ id: "stock", type: "stock", p: [SV.REAR, 0, 0] }));
+  nodes.carrier = carrierGroup(ctx);
+  nodes.dustCover = dustCover(ctx);
+  const root = G.node("m416", [body, nodes.carrier, nodes.dustCover, ...lowerNodes]);
+  root.add(ctx.railMount("upperRail", [up.railFirst, RAIL_TOP2, 0], "top", up.railSlots, { axis: "top" }));
+  root.add(ctx.mount({ id: "hg", type: "hg", p: [38, 0, 0] }));
+  root.add(ctx.mount({ id: "muzzle", type: "thread", p: [368, 0, 0] }));
+  root.add(ctx.mount({ id: "magwell", type: "magwell", p: [-6, -62, 0] }));
+  root.add(ctx.mount({ id: "grip", type: "grip", p: [-121, -40, 0] }));
+  root.add(ctx.mount({ id: "stock", type: "stock", p: [-338, 1, 0], slots: 6, pitch: -16, axis: "stock" }));
+  root.add(ctx.mount({ id: "charger", type: "charger", p: [-142, 18, 0] }));
   return {
     root,
     nodes,
-    anim: { carrierTravel: 128, selector: { safe: 0, semi: -16 } },
-    eject: { p: [-52, 6, 17], dir: [0.3, 0.5, 1], speed: 3.6 },
-    muzzle: [SV.MUZZLE, 0, 0],
-    irons: { rear: [SV.REAR_X, SV.SIGHT_Y, 0], front: [SV.FRONT_X, SV.SIGHT_Y, 0], type: "notch" },
-    eyeX: -300,
-    focus: { center: [30, -50, 0], size: 1420 }
+    anim: { carrierTravel: 92, portCover: nodes.dustCover, selector: { safe: 0, semi: 90, auto: 180 } },
+    eject: { p: [-26, 2, 16], dir: [0.25, 0.35, 1] },
+    muzzle: [368, 0, 0],
+    chamber: [0, 0, 0],
+    eyeX: -238,
+    cheekY: RAIL_TOP2 + 22,
+    focus: { center: [20, -20, 0], size: 920 }
   };
 }
-/* --------------------------------------------------------------- цевьё */
-// Накладки: две половины с продолговатыми отверстиями охлаждения, передняя пружинная обойма.
-function svdHg(ctx, o) {
-  const { extrudeX: exX, T: T2, box: bx, node: nd, shape: sh, slot: sl, extrudeZ: exZ, cylZ: cZ } = ctx.G;
-  const k = ctx.kit();
-  const x0 = 110, x1 = 388, M = o.mat;
-  const half = (s) => [[0, 36, 3], [s * 21, 30, 6], [s * 23, 6, 8], [s * 17, -18, 8], [0, -21, 3], [0, -17], [s * 13, -14], [s * 19, 6], [s * 17, 28], [0, 32]];
-  for (const s of [-1, 1]) k.add(M, exX(half(s).map(([z, y, r]) => [z, y, r || 0]), x0, x1, { bevel: 1.4 }));
-  // отверстия охлаждения по бортам
-  for (let i = 0; i < 6; i++) for (const s of [-1, 1]) k.add("lensBlack", T2(exZ(sh(sl(-16, 16, 0, 8)), 1, { bevel: 0.2 }), { p: [x0 + 30 + i * 40, 12, s * 22.4] }));
-  // обойма
-  k.add("steel", exX([[-24, 34, 4], [24, 34, 4], [24, -22, 8], [-24, -22, 8]].map(([z, y, r]) => [z, y, r]), x1, x1 + 12, { bevel: 1 }));
-  k.add("steel", exX([[-24, 34, 4], [24, 34, 4], [24, -22, 8], [-24, -22, 8]], x0 - 10, x0, { bevel: 1 }));
-  k.add("steelWorn", T2(cZ(2.4, 23, 25.5, { seg: 12 }), { p: [x1 + 6, 6, 0] }));
-  return { root: nd("hg", [k.build()]) };
-}
-function svdHgRail(ctx) {
-  const { extrudeX: exX, T: T2, box: bx, node: nd, picatinny: pic, mlokHoles: ml, extrudeZ: exZ, shape: sh, circle: ci } = ctx.G;
-  const k = ctx.kit();
-  const x0 = 106, x1 = 392;
-  const sec = [[-24, 14, 2], [-26, -4, 4], [-20, -24, 6], [20, -24, 6], [26, -4, 4], [24, 14, 2], [20, 14], [21, -2], [16, -19], [-16, -19], [-21, -2], [-20, 14]];
-  k.add("alu", exX(sec, x0, x1, { bevel: 1.2 }));
-  k.add("alu", exX(sh([[-15, 12, 2], [15, 12, 2], [15, SV.GAS_Y + 11, 3], [-15, SV.GAS_Y + 11, 3]], [ci(0, SV.GAS_Y, 8.6, 24)]), x0 + 4, x1 - 4, { bevel: 1.2 }));
-  for (const h of ml(x0 + 20, x1 - 70, -8, { h: 7, len: 32 })) for (const s of [-1, 1]) k.add("lensBlack", exZ(sh(h), 1, { bevel: 0.2, z: s * 25.8 }));
-  const mounts = [];
-  const add = (id, face, rot, len, pos, base) => {
-    const r = pic(len, { base });
-    k.add("alu", r.geo, { r: rot, p: pos });
-    mounts.push(ctx.railMount(id, [pos[0] + r.first, pos[1], pos[2]], face, r.slots, { axis: face }));
-  };
-  add("hgBottom", "bottom", [180, 0, 0], 200, [x1 - 206, -33, 0], 9);
-  add("hgRight", "right", [90, 0, 0], 70, [x1 - 80, -4, 34], 8.5);
-  add("hgLeft", "left", [-90, 0, 0], 70, [x1 - 80, -4, -34], 8.5);
-  add("gasRail", "top", [0, 0, 0], 170, [x0 + 8, SV.GAS_Y + 20.4, 0], 9.4);
-  return { root: nd("svd_rail", [k.build(), ...mounts]) };
-}
-/* --------------------------------------------------------------- дульные */
-function svdFh(ctx) {
-  const { latheX: lX, T: T2, box: bx, node: nd } = ctx.G;
-  const k = ctx.kit();
-  // штатный: длинный цилиндр с пятью продольными прорезями, срез со «щелью»
-  k.add("steel", lX([[0, 0], [0, 11.6], [2, 12.4], [70, 12.4], [72, 11.2], [72, 7.6], [4, 7.6], [4, 0]], { seg: 36 }));
-  for (let i = 0; i < 5; i++) k.add("lensBlack", T2(bx(38, 2.4, 3.6, { bevel: 0.6 }), { p: [48, 11.6, 0], r: [i * 72, 0, 0] }));
-  return { root: nd("svdfh", [k.build()]), muzzle: { x: 72, kind: "fh", flash: 0.35 } };
-}
-function svdBrake(ctx) {
-  const { latheX: lX, T: T2, box: bx, cylY: cY, node: nd, flutesX: fl } = ctx.G;
-  const k = ctx.kit();
-  k.add("steel", lX([[0, 0], [0, 13.4], [1.4, 15], [72, 15], [74, 13.6], [74, 5.4], [70, 5], [70, 0]], { seg: 36 }));
-  for (let i = 0; i < 3; i++) for (const s of [-1, 1]) k.add("lensBlack", T2(bx(11, 14, 4, { bevel: 2 }), { p: [28 + i * 16, 0, s * 13.8] }));
-  for (let i = 0; i < 2; i++) k.add("lensBlack", T2(cY(2.4, 12, 16, { seg: 12 }), { p: [26 + i * 16, 0, 0] }));
-  k.add("steel", fl(15, 3, 14, 6, 3, 0.6));
-  return { root: nd("svdbrake", [k.build()]), muzzle: { x: 74, kind: "brake", flash: 0.6 } };
-}
-function svdCan(ctx) {
-  const { latheX: lX, flutesX: fl, tubeX: tb, cylX: cX, node: nd, ringGrooves: rg } = ctx.G;
-  const k = ctx.kit();
-  const R4 = 22, L = 230;
-  k.add("steel", lX([[0, 0], [0, 12.4], [20, 12.4], [20, 0]], { seg: 28 }));
-  k.add("cast", lX([[8, 0], [8, R4 - 5], [14, R4], [L - 6, R4], [L, R4 - 5], [L, 6.4], [L - 3, 5.8], [L - 3, 0]], { seg: 48, crease: 30 }));
-  k.add("cast", rg(R4 + 0.3, 16, 40, 8, 0.6, { seg: 48 }));
-  for (const x of [80, 150]) k.add("cast", tb(R4 + 0.9, R4 - 0.2, x, x + 5, { seg: 48 }));
-  k.add("lensBlack", cX(6.4, L - 3, L + 0.05, { seg: 20 }));
-  return { root: nd("rotor43", [k.build()]), muzzle: { x: L, kind: "supp", flash: 0.03 } };
-}
-/* --------------------------------------------------------------- магазины */
-function svdMag(ctx, o) {
-  const { T: T2, box: bx } = ctx.G;
-  const m = boxMag(ctx, { d0: 88, d1: 84, w: 25, lipH: 12, lipX0: 6, lipX1: 60, lipRise: 4.4, lipCurl: 3.2, cal: "762x54R", plateH: 6, plateOver: 6, roundTilt: 4, ...o });
-  // «вафельные» выштамповки стального магазина
-  if (o.waffle) {
-    const k = ctx.kit();
-    for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) for (const s of [-1, 1]) k.add(o.mat, T2(bx(28, 18, 1.2, { bevel: 0.6 }), { p: [-22 - j * 36, -16 - i * 26, s * 12.9] }));
-    m.root.add(k.build());
-  }
-  return m;
-}
-/* --------------------------------------------------------------- приклады */
-// Пистолетная рукоять СВДС/СВДМ: отдельная деталь под задней частью коробки, за спусковой скобой.
-// Координаты — от заднего среза коробки (узел приклада). Верх оси спрятан в коробке, фланец прилегает к дну.
-function svdPistolGrip(ctx, k, mat = "poly") {
-  const { loftPath: lp, extrudeY: exY, T: T2, shape: sh, rrect: rr, cylZ: cZ } = ctx.G;
-  const B = SV.BOTTOM, rake = 18 * Math.PI / 180, L = 118;
-  const x0 = 40, y0 = B + 8, dx = -Math.sin(rake), dy = -Math.cos(rake);
-  const secs = (d, db, t0 = 0, t1 = 1, n = 16) => {
-    const out = [];
-    for (let i = 0; i <= n; i++) {
-      const t = t0 + (t1 - t0) * i / n, u = (t - 0.26) / 0.64;
-      // три выемки под пальцы спереди, «брюшко» под ладонь сзади, лёгкий упор внизу
-      const groove = u > 0 && u < 1 ? 1.7 * Math.sin(Math.PI * 3 * u) ** 2 : 0;
-      const flare = t > 0.9 ? (t - 0.9) * 22 : 0;
-      out.push({ c: [x0 + dx * L * t, y0 + dy * L * t], a: 14.6 - groove + flare - d, a2: 15.2 + 2.6 * Math.sin(Math.PI * Math.min(1, t * 1.2)) + flare - d, b: 13 + 1.3 * Math.sin(Math.PI * t) + db, k: 2.7 });
-    }
-    return out;
-  };
-  k.add(mat, lp(secs(0, 0), { seg: 36 }));
-  // боковые панели с мелкой насечкой лежат на поверхности рукояти (чуть шире по Z, уже спереди/сзади)
-  k.add("polyGrip", lp(secs(2.8, 0.45, 0.2, 0.86, 12), { seg: 36 }));
-  // фланец по дну коробки и винт крепления
-  k.add(mat, exY(sh(rr(40, 0, 48, 29, 5)), B - 3.4, B + 0.2, { bevel: 1 }));
-  k.add("steelWorn", T2(cZ(2.6, -15, 15, { seg: 14, c: 0.4 }), { p: [50, B - 1.6, 0] }));
-  const bx0 = x0 + dx * L, by0 = y0 + dy * L;
-  k.add("steelWorn", T2(cZ(3, -1, 1, { seg: 16 }), { p: [bx0 - 2, by0 + 12, 13.8] }));
-}
-// Резиновый затыльник с горизонтальными рёбрами (рёбра — прямо в контуре, по всей ширине).
-function svdButtPad(ctx, xf, yTop, yBot, depth, width, o = {}) {
-  const { extrudeZ: exZ } = ctx.G;
-  const n = o.n ?? 26, mid = (yTop + yBot) / 2, hh = (yTop - yBot) / 2, pts = [[xf, yTop + 1, 3]];
-  for (let i = 0; i <= n; i++) {
-    const y = yTop - 2 - (yTop - yBot - 4) * i / n, q = (y - mid) / hh;
-    pts.push([xf - depth - (o.bulge ?? 2.5) * (1 - q * q) - (i % 2 ? 1.3 : 0), y]);
-  }
-  pts.push([xf - (o.slant ?? 0), yBot - 1, 3]);
-  return exZ(pts, width, { bevel: 2.2 });
-}
-// «Скелет» с пистолетным вырезом и съёмной щекой.
-function svdStock(ctx, o) {
-  const { extrudeZ: exZ, T: T2, box: bx, shape: sh, node: nd, cylZ: cZ, screwHead: sw } = ctx.G;
-  const k = ctx.kit();
-  const M = o.mat;
-  const outline = [[16, 14, 2], [-6, 14, 3], [-60, 4, 16], [-210, -6, 20], [-360, -10, 8], [-372, -12, 4], [-372, -150, 6], [-352, -152, 10], [-240, -96, 30], [-120, -72, 16], [-70, -112, 14], [-40, -114, 10], [-26, -60, 10], [-2, -26, 4], [16, -26, 2]];
-  const hole = [[-44, -30, 8], [-96, -44, 14], [-230, -58, 24], [-334, -60, 20], [-344, -40, 12], [-300, -22, 10], [-110, -18, 10], [-56, -12, 6]];
-  k.add(M, exZ(sh(outline, [hole]), 34, { bevel: 6, curve: 8 }));
-  // затыльник (сталь со «сдвоенным» упором)
-  k.add("steel", T2(exZ([[-372, -8, 3], [-380, -8, 4], [-380, -154, 6], [-372, -152, 4]], 38, { bevel: 1.6 }), {}));
-  for (const y of [-30, -128]) k.add("steelWorn", T2(sw(3.2, 1.3), { r: [0, -90, 0], p: [-380, y, 0] }));
-  if (o.cheek) {
-    // съёмная щека на защёлке
-    k.add(o.cheekMat || "polySoft", T2(exZ([[-70, 17, 8], [-250, 11, 10], [-250, -8, 4], [-70, 1, 4]], 38, { bevel: 5 }), {}));
-    k.add("steelWorn", T2(cZ(3, -20, 20, { seg: 12 }), { p: [-110, 16, 0] }));
-  }
-  k.add("steel", exZ([[18, 16], [0, 16], [0, -24], [18, -24]], 30, { bevel: 1.2 }));
-  // задняя антабка — снизу приклада, на вертлюге
-  svdSwivel(ctx, k, [-330, -142, 0], 0, { w: 18 });
-  return { root: nd("svdstock", [k.build()]), cheek: { x: -140, y: 18 } };
-}
-// СВДС: отдельная пистолетная рукоять под коробкой + трубчатый приклад на шарнире справа.
-// Верхняя труба — от узла шарнира в затыльник, нижняя — наклонная тяга; щека обжимает верхнюю трубу.
-function svdsStock(ctx) {
-  const { extrudeZ: exZ, extrudeX: exX, T: T2, cylX: cX, cylY: cY, cylZ: cZ, node: nd, box: bx, shape: sh, circle: ci, screwHead: sw } = ctx.G;
-  const k = ctx.kit(), f = ctx.kit();
-  svdPistolGrip(ctx, k);
-  // колодка шарнира на заднем срезе коробки: снизу опускается под нижнюю тягу
-  const PX = -26, PZ = 22, TY = -4, TR = 10;
-  k.add("steel", exZ([[0, 13, 1], [-22, 13, 3], [PX, 7, 2], [PX, -36, 3], [-20, -44, 4], [0, -44, 2]], 34, { bevel: 1.4 }));
-  k.add("steel", exZ([[0, 12], [6, 12], [6, -24], [0, -24]], 27, { bevel: 0.6 }));
-  for (const y of [4, -30]) k.add("steelWorn", T2(sw(2.8, 1.2), { p: [-10, y, 17] }));
-  // ушки шарнира (верхнее и нижнее) справа, ось вертикальная
-  for (const [y0, y1] of [[5, 13], [-44, -35]]) {
-    k.add("steel", T2(cY(6.5, y0, y1, { seg: 20, c: 0.8 }), { p: [PX, 0, PZ] }));
-    k.add("steel", T2(bx(14, y1 - y0, 8, { bevel: 0.8 }), { p: [PX + 6, (y0 + y1) / 2, 18.5] }));
-  }
-  k.add("steelBright", T2(cY(2.6, -46, 15, { seg: 14 }), { p: [PX, 0, PZ] }));
-  for (const y of [-46.6, 14.4]) k.add("steelWorn", T2(cY(3.8, y, y + 1.2, { seg: 16, c: 0.4 }), { p: [PX, 0, PZ] }));
-  // кнопка фиксатора слева, в защитном кольце
-  k.add("steel", T2(cZ(7.2, -18.6, -16.6, { seg: 24, c: 0.5 }), { p: [-12, -14, 0] }));
-  k.add("steelBright", T2(cZ(4.6, -21.4, -17, { seg: 20, c: 0.8 }), { p: [-12, -14, 0] }));
-  // --- складывающаяся часть (в координатах приклада; узел fold ставится на ось шарнира)
-  f.add("steel", exZ([[-26.6, 13, 2], [-40, 13, 3], [-40, -44, 3], [-26.6, -44, 2]], 34, { bevel: 1.4 }));
-  f.add("steel", T2(cY(6.5, -34, 4, { seg: 20, c: 0.8 }), { p: [PX, 0, PZ] }));
-  f.add("steel", T2(bx(12, 38, 8, { bevel: 0.8 }), { p: [PX - 7, -15, 18.5] }));
-  f.add("steelWorn", T2(bx(6, 4, 3, { bevel: 0.6 }), { p: [-30, -14, -17.4] }));
-  // верхняя труба с обжимными муфтами на обоих концах
-  f.add("steel", T2(cX(TR, -334, -38, { c: 0.6, seg: 28 }), { p: [0, TY, 0] }));
-  f.add("steel", T2(cX(TR + 2.6, -54, -39, { c: 1, seg: 28 }), { p: [0, TY, 0] }));
-  f.add("steel", T2(cX(TR + 2.6, -328, -312, { c: 1, seg: 28 }), { p: [0, TY, 0] }));
-  // нижняя тяга: из колодки вниз-назад в нижнюю часть затыльника
-  const S0 = [-38, -34], S1 = [-324, -112], sL = Math.hypot(S1[0] - S0[0], S1[1] - S0[1]);
-  const sA = Math.atan2(S1[1] - S0[1], S1[0] - S0[0]) * 180 / Math.PI, strut = { r: [0, 0, sA], p: [S0[0], S0[1], 0] };
-  f.add("steel", T2(cX(8, 0, sL, { c: 0.6, seg: 24 }), strut));
-  f.add("steel", T2(cX(10.4, 0, 14, { c: 1, seg: 24 }), { ...strut }));
-  f.add("steel", T2(cX(10.4, sL - 20, sL - 4, { c: 1, seg: 24 }), { ...strut }));
-  // стальная рамка затыльника и резиновый затыльник
-  f.add("steel", exZ([[-316, 17, 3], [-336, 18, 3], [-338, -152, 4], [-318, -152, 3], [-322, -118, 12], [-316, -40, 20]], 38, { bevel: 1.8 }));
-  f.add("rubber", svdButtPad(ctx, -337, 18, -153, 13, 42, { slant: 1.5 }));
-  for (const y of [8, -140]) f.add("steelWorn", T2(sw(2.6, 1), { p: [-327, y, 19] }));
-  // щека: полимерная колодка с отверстием точно по трубе, стянута двумя винтами снизу
-  const cheekOut = [[-12.6, TY - 13.5, 6], [12.6, TY - 13.5, 6], [15, TY + 11, 6], [13, 23, 7], [-13, 23, 7], [-15, TY + 11, 6]];
-  f.add("poly", exX(sh(cheekOut, [ci(0, TY, TR + 0.05, 32)]), -236, -84, { bevel: 4, curve: 8 }));
-  f.add("polySoft", exX(sh([[-11, 22], [11, 22], [11, 24.2, 1], [-11, 24.2, 1]]), -226, -94, { bevel: 0.8 }));
-  f.add("lensBlack", T2(bx(136, 0.6, 2.4, { bevel: 0 }), { p: [-160, TY - 13.6, 0] }));
-  for (const x of [-122, -198]) {
-    f.add("steelWorn", T2(sw(3, 1.3), { p: [x, TY - 9, 13.2] }));
-    f.add("steelWorn", T2(cZ(3.4, -14.8, -13, { seg: 6 }), { p: [x, TY - 9, 0] }));
-  }
-  svdSwivel(ctx, f, [-329, -128, -19], -1, { w: 16 });
-  const fold = nd("fold", [f.build()], { p: [PX, 0, PZ] });
-  fold.children[0].position.set(-PX, 0, -PZ);
-  return { root: nd("svds", [k.build(), fold]), fold: { node: fold, axis: "y", angle: 172 }, cheek: { x: -140, y: 18 } };
-}
-// СВДМ: пистолетная рукоять, труба-направляющая, ползун с регулируемой щекой. Ползун ездит на +60 мм.
-function svdmStock(ctx) {
-  const { extrudeZ: exZ, T: T2, cylX: cX, cylY: cY, cylZ: cZ, node: nd, box: bx, shape: sh, ringGrooves: rg } = ctx.G;
-  const k = ctx.kit(), sl = ctx.kit();
-  svdPistolGrip(ctx, k);
-  // переходник на коробку и труба-направляющая с гребёнкой фиксатора снизу
-  k.add("steel", exZ([[16, 16], [-30, 16, 2], [-34, 9, 2], [-34, -20, 3], [-26, -26, 2], [16, -26]], 34, { bevel: 1.4 }));
-  for (const y of [8, -18]) k.add("steelWorn", T2(cZ(2.6, 16.6, 17.6, { seg: 14 }), { p: [-14, y, 0] }));
-  k.add("alu", T2(cX(14.6, -250, -30, { c: 1, seg: 32 }), { p: [0, -2, 0] }));
-  k.add("alu", T2(rg(15.1, -48, -36, 3, 0.5, { seg: 32 }), { p: [0, -2, 0] }));
-  k.add("alu", T2(bx(214, 4, 7, { bevel: 0.6 }), { p: [-142, -17.4, 0] }));
-  for (let i = 0; i < 6; i++) k.add("lensBlack", T2(bx(4, 0.4, 4, { bevel: 0 }), { p: [-66 - i * 14, -19.5, 0] }));
-  const body = sh([[-186, 18, 4], [-332, 18, 4], [-342, 10, 4], [-342, -140, 8], [-300, -142, 10], [-262, -64, 22], [-200, -24, 8], [-186, -22, 4]], [[[-290, -44, 6], [-328, -44, 6], [-328, -124, 8], [-312, -124, 8]]]);
-  sl.add("poly", exZ(body, 40, { bevel: 4 }));
-  sl.add("rubber", svdButtPad(ctx, -341, 12, -143, 11, 42, { n: 22 }));
-  // рычаг фиксатора длины под трубой и гнёзда QD-антабок
-  sl.add("steelWorn", exZ([[-190, -22], [-214, -22, 2], [-218, -30, 2], [-196, -31, 2]], 10, { bevel: 0.8 }));
-  for (const s of [-1, 1]) {
-    sl.add("steel", T2(cZ(6, 0, 1.4, { seg: 20, c: 0.3 }), { p: [-318, -24, s > 0 ? 19.6 : -21] }));
-    sl.add("lensBlack", T2(cZ(3.2, 0, 1.6, { seg: 14 }), { p: [-318, -24, s > 0 ? 19.8 : -21.4] }));
-  }
-  // щека на двух стойках, фиксатор высоты слева
-  sl.add("poly", exZ([[-196, 40, 6], [-322, 40, 6], [-322, 28, 3], [-196, 28, 3]], 32, { bevel: 4 }));
-  for (const x of [-220, -292]) {
-    sl.add("alu", T2(cY(5, 16, 30, { seg: 18, c: 0.4 }), { p: [x, 0, 0] }));
-    sl.add("steelWorn", T2(cY(7, 17, 19.5, { seg: 18, c: 0.6 }), { p: [x, 0, 0] }));
-  }
-  sl.add("steelWorn", T2(cZ(5.5, -25, -19.5, { seg: 20, c: 0.8 }), { p: [-256, 8, 0] }));
-  const slide = nd("slide", [sl.build()]);
-  return { root: nd("svdm", [k.build(), slide]), fold: { node: slide, slide: 60 }, cheek: { x: -250, y: 40 } };
-}
-var svd_default = {
-  id: "svd",
-  family: "svd",
-  title: "СВД — снайперская винтовка Драгунова",
-  short: "СВД",
-  caliber: "7,62×54R",
-  cal: "762x54R",
-  thread: "svd",
-  boltHold: true,
-  holdByFollower: true,
-  chargeLabel: "затвор",
-  specs: [["Ствол", "620 мм"], ["Длина", "1225 мм"], ["Магазин", "10"], ["Масса", "4,3 кг"]],
-  base: { weight: 3700, length: 1225, ergo: 38, recoilV: 100, recoilH: 80, moa: 1.2, velocity: 830, range: 800, loud: 166, flash: 50, adsTime: 420, rpm: 600, mag: 10 },
-  audio: { cal: "762x54R", mech: 1 },
-  modes: ["safe", "semi"],
-  build: svdBase,
-  keepOut: [{ axis: "top", x0: 60, x1: 110, label: "колодка целика" }],
+var m416_default = {
+  id: "m416",
+  title: "HK416 A5",
+  short: "M416",
+  caliber: "5,56×45 NATO",
+  cal: "556",
+  thread: "1/2x28",
+  specs: [["Ствол", '368 мм (14,5")'], ["Автоматика", "газовый поршень"], ["Темп", "850 выстр/мин"], ["Масса", "3,49 кг"]],
+  base: { weight: 2420, length: 800, ergo: 52, recoilV: 100, recoilH: 100, moa: 1.4, velocity: 880, range: 450, loud: 160, flash: 70, adsTime: 280, rpm: 850, mag: 30 },
+  audio: { cal: "556", body: 0.55, crack: 1, mech: 0.8 },
+  modes: ["safe", "semi", "auto"],
+  build,
   slots: [
-    { id: "handguard", label: "Цевьё", group: "Ствол и цевьё", accepts: ["svdhg"], mount: "hg", required: true },
-    { id: "muzzle", label: "Дульное устройство", group: "Ствол и цевьё", accepts: ["muzzle"], mount: "muzzle" },
-    { id: "sidemount", label: "Боковой кронштейн", group: "Оптика", accepts: ["sidemount"], rails: ["dovetail"] },
-    { id: "optic", label: "Прицел", group: "Оптика", accepts: ["optic"], rails: ["sideRail", "dovetail", "gasRail"], prefer: { x: -110 } },
-    { id: "under", label: "Под стволом", group: "Тактика", accepts: ["foregrip", "bipod"], rails: ["hgBottom"], prefer: "front" },
+    { id: "handguard", label: "Цевьё", group: "Цевьё и ствол", accepts: ["hg"], mount: "hg", iface: "hk416" },
+    { id: "muzzle", label: "Дульное устройство", group: "Цевьё и ствол", accepts: ["muzzle"], mount: "muzzle" },
+    { id: "rearsight", label: "Целик", group: "Оптика", accepts: ["rearsight"], rails: ["upperRail"], prefer: "rear" },
+    { id: "frontsight", label: "Мушка", group: "Оптика", accepts: ["frontsight"], rails: ["hgTop"], prefer: "front" },
+    { id: "optic", label: "Прицел", group: "Оптика", accepts: ["optic"], rails: ["upperRail", "hgTop"], prefer: { x: -40 } },
+    { id: "magnifier", label: "Увеличитель", group: "Оптика", accepts: ["magnifier"], rails: ["upperRail", "hgTop"], prefer: { x: -90 }, behind: "optic" },
+    { id: "offset", label: "Боковой коллиматор", group: "Оптика", accepts: ["offset"], rails: ["upperRail", "hgTop"], prefer: { x: 20 } },
+    { id: "under", label: "Под стволом", group: "Тактика", accepts: ["foregrip", "bipod"], rails: ["hgBottom"], prefer: { x: 190 } },
     { id: "tacRight", label: "Правая планка", group: "Тактика", accepts: ["light", "laser", "combo"], rails: ["hgRight"], prefer: "front" },
     { id: "tacLeft", label: "Левая планка", group: "Тактика", accepts: ["light", "laser", "combo"], rails: ["hgLeft"], prefer: "front" },
-    { id: "mag", label: "Магазин", group: "Коробка", accepts: ["mag"], mount: "magwell" },
-    { id: "stock", label: "Приклад", group: "Коробка", accepts: ["stock"], mount: "stock", required: true }
+    { id: "tacTop", label: "Верх цевья", group: "Тактика", accepts: ["laser"], rails: ["hgTop"], prefer: "front" },
+    { id: "mag", label: "Магазин", group: "Ствольная коробка", accepts: ["mag"], mount: "magwell", iface: "stanag" },
+    { id: "pgrip", label: "Пистолетная рукоять", group: "Ствольная коробка", accepts: ["pgrip"], mount: "grip", iface: "ar" },
+    { id: "stock", label: "Приклад", group: "Ствольная коробка", accepts: ["stock"], mount: "stock", rails: ["stock"], iface: "ar", prefer: { x: -386 } },
+    { id: "charger", label: "Рукоять заряжания", group: "Ствольная коробка", accepts: ["charger"], mount: "charger", iface: "ar" }
   ],
-  parts: [
-    { id: "hg_wood", cat: "svdhg", name: "Накладки, клеёная берёза", desc: "Штатные, с отверстиями охлаждения", stats: { weight: 260 }, build: (c) => svdHg(c, { mat: "wood" }) },
-    { id: "hg_poly", cat: "svdhg", name: "Накладки, полимер", desc: "Чёрный стеклонаполненный полиамид", stats: { weight: 210, ergo: 1 }, build: (c) => svdHg(c, { mat: "poly" }) },
-    { id: "hg_rail", cat: "svdhg", name: "Цевьё с планками", desc: "Пикатинни снизу, по бортам и на газовой трубке", stats: { weight: 480, ergo: 3 }, build: svdHgRail },
-    { id: "svd_fh", cat: "muzzle", name: "Пламегаситель СВД", desc: "Штатный, пять прорезей", fit: { thread: ["svd"] }, stats: { weight: 110, length: 72, flash: -35 }, build: svdFh },
-    { id: "svd_dtk", cat: "muzzle", name: "ДТК для СВД", desc: "Трёхкамерный: заметно меньше отдача, громче", fit: { thread: ["svd"] }, stats: { weight: 190, length: 74, flash: 20, "recoilV%": -26, "recoilH%": -20, loud: 4 }, build: svdBrake },
-    { id: "rotor43", cat: "muzzle", name: "Глушитель Rotor 43 (7,62×54R)", desc: "Снижает звук и вспышку, пуля остаётся сверхзвуковой", fit: { thread: ["svd"] }, stats: { weight: 680, length: 230, loud: -25, flash: -60, "recoilV%": -14, ergo: -9, adsTime: 30, velocity: 8 }, build: svdCan },
-    { id: "mag10", cat: "mag", name: "Магазин 10, сталь", desc: "Штатный, «вафельные» выштамповки", stats: { weight: 240, mag: 10 }, build: (c) => svdMag(c, { R: 900, len: 106, mat: "steelPark", cap: 10, waffle: true }) },
-    { id: "mag10p", cat: "mag", name: "Магазин 10, полимер", desc: "Легче стального", stats: { weight: 150, mag: 10, ergo: 1 }, build: (c) => svdMag(c, { R: 900, len: 106, mat: "poly", cap: 10, ribs: true }) },
-    { id: "mag20", cat: "mag", name: "Магазин 20", desc: "Удлинённый, мешает стрельбе лёжа", stats: { weight: 380, mag: 20, ergo: -5, adsTime: 14 }, build: (c) => svdMag(c, { R: 700, len: 176, mat: "steelPark", cap: 20, waffle: true }) },
-    { id: "st_wood", cat: "stock", name: "Приклад-«скелет», берёза", desc: "Штатный, со съёмной щекой", stats: { weight: 620 }, build: (c) => svdStock(c, { mat: "wood", cheek: true, cheekMat: "wood" }) },
-    { id: "st_poly", cat: "stock", name: "Приклад-«скелет», полимер", desc: "Чёрный, 1990-х годов", stats: { weight: 540, ergo: 1 }, build: (c) => svdStock(c, { mat: "poly", cheek: true, cheekMat: "poly" }) },
-    { id: "st_svds", cat: "stock", name: "СВДС, складной", desc: "Трубчатый, складывается вправо (K)", stats: { weight: 700, ergo: 2, "recoilV%": 4 }, build: svdsStock },
-    { id: "st_svdm", cat: "stock", name: "СВДМ, телескопический", desc: "Регулируемые длина и щека (K)", stats: { weight: 820, ergo: 5, "recoilV%": -8, "recoilH%": -6 }, build: svdmStock }
-  ],
+  parts: M416_PARTS,
   defaults: {
-    handguard: "hg_wood",
-    muzzle: "svd_fh",
-    sidemount: null,
-    optic: "pso1",
+    handguard: "hk_quad",
+    muzzle: "hk_fh",
+    optic: null,
+    rearsight: "hk_diopter",
+    frontsight: "hk_front",
+    magnifier: null,
     under: null,
     tacRight: null,
     tacLeft: null,
-    mag: "mag10",
-    stock: "st_wood"
+    tacTop: null,
+    mag: "hk_steel30",
+    pgrip: "hk_v2",
+    stock: "hk_slim",
+    charger: "ch_std"
   }
 };
 
-// src/entries/svd.js
-boot(svd_default, LIB).catch((e) => {
+// src/entries/m416.js
+boot(m416_default, LIB).catch((e) => {
   console.error(e);
   const b = document.getElementById("boot-t");
   if (b) b.textContent = "Ошибка: " + e.message;

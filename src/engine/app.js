@@ -13,6 +13,52 @@ var HIT = { "556": 2.5, "545": 2.5, "762x39": 3.2, "762x51": 4.5, "762x54R": 5, 
 var ZERO = { "9x19": 25, "12ga": 25 };
 var TRACE_MODES = ["trace", "tracer", "off"];
 var TRACE_LABEL = { trace: "след пули", tracer: "трассирующие", off: "трасса скрыта" };
+// Луч и питание по умолчанию: кд, профиль отражателя (σ пятна и край засветки в радианах), ёмкость в минутах
+var BEAM_DEF = { candela: 2e4, hot: 0.075, spill: 0.55, spillK: 0.035, ring: 0.06, color: 15922687, lensR: 0.014 };
+var POWER_DEF = { light: 22, laser: 30, driver: "reg", cells: "2 × CR123A" };
+var fract = (x) => x - Math.floor(x);
+var hash1 = (i) => fract(Math.sin(i * 12.9898) * 43758.5453);
+// мерцание почти севшего светодиода: плавный шум с провалами
+function flicker(t, rate = 9) {
+  const a = Math.floor(t * rate), f = t * rate - a, s = f * f * (3 - 2 * f);
+  const v = hash1(a) * (1 - s) + hash1(a + 1) * s;
+  return v > 0.38 ? 0.8 + 0.2 * v : 0.06 + 0.1 * v;
+}
+// Световой поток от заряда: «reg» — стабилизированный драйвер (ровно до ~12 %, дальше садится и желтеет),
+// «step» — ступенчатый (18650: 100 % → 42 % → гаснет).
+function lightOutput(lv, driver, t) {
+  if (lv <= 0) return { k: 0, warm: 0 };
+  let k, warm = 0;
+  if (driver === "step") k = lv > 0.15 ? 1 : lv > 0.03 ? 0.42 : 0.42 * Math.sqrt(lv / 0.03);
+  else {
+    k = lv > 0.12 ? 1 - 0.04 * (1 - lv) : 0.95 * Math.pow(lv / 0.12, 0.9);
+    warm = lv < 0.12 ? (1 - lv / 0.12) * 0.4 : 0;
+  }
+  if (lv < 0.035) k *= flicker(t);
+  return { k, warm };
+}
+function laserOutput(lv, t) {
+  if (lv <= 0) return 0;
+  let k = lv > 0.1 ? 1 : 0.3 + 0.7 * (lv / 0.1);
+  if (lv < 0.03) k *= flicker(t * 1.6, 13);
+  return k;
+}
+// цветовая температура светодиода → hex (приближение Таннера Хелланда)
+function kelvinHex(K) {
+  const t = K / 100, c = (v) => Math.round(Math.min(255, Math.max(0, v)));
+  const r = t <= 66 ? 255 : 329.7 * Math.pow(t - 60, -0.1332);
+  const g = t <= 66 ? 99.47 * Math.log(t) - 161.12 : 288.12 * Math.pow(t - 60, -0.0755);
+  const b = t >= 66 ? 255 : t <= 19 ? 0 : 138.52 * Math.log(t - 10) - 305.04;
+  return c(r) << 16 | c(g) << 8 | c(b);
+}
+// Луч фонаря в едином формате. У модулей набора M416 есть beam; у остальных — сила света (кд),
+// размер пятна и засветки в долях конуса 0,62 рад и цветовая температура.
+function beamOf(d) {
+  if (d.beam) return { ...BEAM_DEF, ...d.beam, lensR: d.beam.lensR ?? (d.lensR ?? 13) / 1e3 };
+  const lm = d.lumens || 500, cd = d.cd ?? lm * 22;
+  const hot = d.hot ?? (cd / lm > 28 ? 0.15 : 0.21);
+  return { ...BEAM_DEF, candela: cd, hot: hot * 0.45, spillK: (d.spill ?? 0.085) * 0.45, color: kelvinHex(d.kelvin ?? 6200), lensR: (d.lensR ?? 11) / 1e3 };
+}
 // м:сс — обратный отсчёт работы батареи
 var mmss = (sec) => {
   const s = Math.max(0, Math.ceil(sec));
@@ -52,7 +98,8 @@ async function boot(def, lib) {
   const audio = new GunAudio();
   audio.profile = { ...def.audio, rpm: def.base.rpm, family: def.family || (def.id.startsWith("ak") ? "ak" : def.id) };
   const fx = new FX(S.scene, mats);
-  fx.lamp = S.night?.lamp || null;
+  const ironRay = new THREE8.Raycaster();
+  fx.floorAt = S.range.floorAt;
   const ball = new Ballistics();
   const tw = new Tweens();
   const aim = new THREE8.Group();
@@ -98,7 +145,10 @@ async function boot(def, lib) {
     climb: 0,
     rec: { p: 0, y: 0, z: 0, vp: 0, vy: 0, vz: 0 },
     stats: {},
-    baseStats: {}
+    baseStats: {},
+    night: false,
+    exposure: 1,
+    expTarget: 1
   };
   let cfg = {};
   let ui = null;
@@ -128,9 +178,12 @@ async function boot(def, lib) {
     poseSelector(true);
     const mz = asm.info("muzzle")?.muzzle;
     audio.muzzle = mz ? mz.kind : "bare";
-    if (audio.ctx) (window.requestIdleCallback || setTimeout)(() => audio.shotBuffer(audio.shotFamily(), audio.muzzle));
+    if (audio.ctx && audio.shotBuffer) (window.requestIdleCallback || setTimeout)(() => audio.shotBuffer(audio.shotFamily(), audio.muzzle));
+    // голос глушителя (звуковой стек M416/АК/SCAR): длина корпуса и заявленное снижение
+    const mzPart = asm.installed.get("muzzle")?.part;
+    audio.voice = mz?.kind === "supp" ? { len: mzPart?.stats?.length || 170, loud: mzPart?.stats?.loud ?? -27, ...mz.voice || {} } : null;
     st.stats = asm.stats();
-    for (const it of asm.installed.values()) for (const s of [it.info?.sight, ...it.info?.alt || []]) {
+    for (const it of asm.installed.values()) for (const s of [it.info?.sight, ...it.info?.alt || [], ...it.info?.sights || []]) {
       if (!s || !s.lens || s.lens.userData.stencilSet) continue;
       const ref = stencilRef++;
       const m = s.lens.material;
@@ -221,7 +274,29 @@ async function boot(def, lib) {
     if (base.irons?.rear && !rear) rear = new THREE8.Vector3(...base.irons.rear);
     if (base.irons?.front && !front) front = new THREE8.Vector3(...base.irons.front);
     const opticFolds = !!opt && [...asm.installed.values()].some((it) => it.info?.flip);
-    if (rear && front && !opticFolds) {
+    // механика, перекрытая установленным модулем (ПСО-1 над коробкой, кронштейн оптики, ЛЦУ сверху),
+    // в список прицелов не попадает: смотреть через неё нельзя
+    const ironsClear = () => {
+      gun.updateMatrixWorld(true);
+      // от глаза (там же, где встанет камера), а не от целика: корпус ПСО бывает позади целика
+      const type = rearIt ? rearIt.info.irons.type || "aperture" : base.irons?.type || "notch";
+      const back = type === "aperture" ? (rearIt ? rearIt.info.irons.eye : base.irons?.eye) ?? 75 : 220;
+      const eye = rear.clone().addScaledVector(front.clone().sub(rear).normalize(), -back);
+      const a = gun.localToWorld(eye), b = gun.localToWorld(front.clone());
+      const d = b.sub(a), len = d.length();
+      ironRay.set(a, d.divideScalar(len));
+      ironRay.near = 0;
+      ironRay.far = len;
+      const meshes = [];
+      for (const it of asm.installed.values()) {
+        if (it.info?.irons) continue;
+        it.obj.traverseVisible((o) => {
+          if (o.isMesh && !o.userData.lens && !o.userData.reticle && !o.material?.transparent) meshes.push(o);
+        });
+      }
+      return !ironRay.intersectObjects(meshes, false).length;
+    };
+    if (rear && front && !opticFolds && ironsClear()) {
       const dir = front.clone().sub(rear).normalize();
       const type = rearIt ? rearIt.info.irons.type || "aperture" : base.irons?.type || "notch";
       const eyeDist = rearIt ? rearIt.info.irons.eye : base.irons?.eye;
@@ -342,7 +417,11 @@ async function boot(def, lib) {
     const kind = mzInfo ? mzInfo.kind : asm.info("barrel")?.muzzleKind || def.bareKind || "bare";
     const pos = muzzleWorld(new THREE8.Vector3(), tmp2);
     const bore = tmp2.clone();
-    fx.muzzleFlash(pos, bore, kind, def.flashSize ?? FLASH[def.cal] ?? 1, { cam: S.camera, smoke: def.cal === "12ga" ? 1.4 : 1 });
+    gun.getWorldQuaternion(tq);
+    // холодный глушитель: первый выстрел даёт хлопок — кислород в камерах догорает
+    const coldCan = kind === "supp" && now - (st.prevShot ?? -10) > 3;
+    st.prevShot = now;
+    fx.muzzleFlash(pos, bore, kind, def.flashSize ?? FLASH[def.cal] ?? 1, tq, { flash: mzInfo ? mzInfo.flash ?? 0.8 : 1, first: coldCan, smoke: def.cal === "12ga" ? 1.4 : 1 });
     const ammo = ammoInfo();
     const pellets = ammo.pellets || 1;
     const spreadMoa = (st.stats.moa || 1.5) + Math.min(st.burst, 10) * 0.7 * (st.stats.recoilV || 100) / 100 + (st.ads ? 0 : def.hipMoa ?? 60);
@@ -359,13 +438,15 @@ async function boot(def, lib) {
     const tracerShot = st.trace === "tracer";
     const onHit = (hit, b, v, graze) => {
       const surf = hit.object.userData.surface || "dirt";
-      fx.impact(hit, surf, { v, graze, pellet: pellets > 1 });
+      fx.impact(hit, surf, { v, graze, pellet: pellets > 1, dir: b.v.clone().normalize(), mass: spec.mass });
       const E = 0.5 * spec.mass / 1e3 * v * v;
       if (surf === "steel") {
         S.range.hit(hit.object.userData.target, (HIT[def.cal] ?? 2.5) * (ammo.energy ?? 1) / Math.sqrt(pellets) * Math.min(1.4, Math.pow(v / b.v0, 2) * 1.15));
         audio.ding(b.dist, Math.min(1.3, 0.6 + ++shot.steel * 0.12));
       } else if (!shot.thumped && !graze) {
-        audio.thump(b.dist);
+        // у звукового стека M416 свой звук на каждую поверхность; бумагу пуля пробивает — слышен вал
+        if (audio.impact) audio.impact(surf === "paper" ? "trap" : surf, surf === "paper" ? Math.max(b.dist, 100) : b.dist);
+        else audio.thump(b.dist);
         shot.thumped = true;
       }
       if (!shot.reported && !graze) {
@@ -495,7 +576,7 @@ async function boot(def, lib) {
         m.visible = false;
         m.position.y = 0;
         m.rotation.z = 0;
-        audio.magDropGround(kind);
+        audio.magDropGround(kind, st.mag / Math.max(1, st.cap));
       });
       st.magIn = false;
       // СВД: затвор на задержке держит подаватель магазина — без магазина он уходит вперёд
@@ -531,9 +612,11 @@ async function boot(def, lib) {
     tw.add(m.position, "y", 0, 0.35, (t) => 1 - Math.pow(1 - t, 3), () => {
       const fin = () => {
         if (!rock) audio.magIn(kind);
+        // проверка рывком за магазин
+        if (!rock && audio.tug) setTimeout(() => audio.tug(kind), 170);
         st.magIn = true;
         if (ui) ui.hud();
-        setTimeout(() => done && done(), 150);
+        setTimeout(() => done && done(), !rock && audio.tug ? 260 : 150);
       };
       if (rock) {
         setTimeout(() => audio.magIn(kind), 90);
@@ -651,7 +734,12 @@ async function boot(def, lib) {
       chargeBack(true, () => setTimeout(() => dropMag(() => setTimeout(() => insertMag(() => setTimeout(() => chargeForward(fin), 120)), 250)), 150));
       return;
     }
-    dropMag(() => setTimeout(() => insertMag(after), 250));
+    dropMag(() => {
+      if (audio.pouch) {
+        audio.pouch(magKind());
+        setTimeout(() => insertMag(after), 480);
+      } else setTimeout(() => insertMag(after), 250);
+    });
   }
   function toggleMag() {
     if (TUBE) {
@@ -710,7 +798,7 @@ async function boot(def, lib) {
       const s = sights[st.sightIdx];
       if (s?.zoom) st.zoom = clamp(st.zoom, s.zoom[0], s.zoom[1]);
     }
-    audio.click();
+    audio.shoulder ? audio.shoulder(on) : audio.click();
     ui?.hud();
   }
   function cycleSight() {
@@ -768,6 +856,9 @@ async function boot(def, lib) {
   function emName(kind, i, n) {
     return (kind === "light" ? "Фонарь" : "ЛЦУ") + (n > 1 ? " " + (i + 1) : "");
   }
+  function powerOf(it) {
+    return { ...POWER_DEF, ...it.part?.power || {} };
+  }
   function lightSpec(it) {
     const d = it.data, lm = d.lumens || 500;
     const cd = d.cd ?? lm * 22;
@@ -781,11 +872,11 @@ async function boot(def, lib) {
       kelvin: d.kelvin ?? 6200,
       throw: Math.min(130, 2 * Math.sqrt(cd) * 0.45),
       lensR: (d.lensR ?? 11) / 1e3,
-      batt: d.batt ?? (lm >= 1000 ? 21 : lm >= 600 ? 24 : 28)
+      batt: it.part?.power?.light ?? d.batt ?? (lm >= 1000 ? 21 : lm >= 600 ? 24 : 28)
     };
   }
   function laserBatt(it) {
-    return it.data.batt ?? (it.info?.light ? 26 : 30);
+    return it.part?.power?.laser ?? it.data.batt ?? (it.info?.light ? 26 : 30);
   }
   // расход заряда в секунду: доля батареи; у комбо-блока складывается из включённых излучателей
   function drainRate(k, assumeOn = false) {
@@ -801,9 +892,15 @@ async function boot(def, lib) {
     return v;
   }
   function lensGlow() {
-    for (const l of lights) l.data.lens.material.emissiveIntensity = isOn(l, "light") ? 6 * battLevel(st.batt[battKey(l)] ?? 1) : 0;
-    for (const l of lasers) l.data.lens.material.emissiveIntensity = isOn(l, "laser") ? 5 * battLevel(st.batt[battKey(l)] ?? 1) : 0;
+    const t = performance.now() / 1e3;
+    for (const l of lights) {
+      const k = isOn(l, "light") ? lightOutput(st.batt[battKey(l)] ?? 1, powerOf(l).driver, t).k : 0;
+      l.data.lens.material.emissiveIntensity = 7 * k;
+      if (l.data.refl) l.data.refl.material.emissiveIntensity = 0.9 * k;
+    }
+    for (const l of lasers) l.data.lens.material.emissiveIntensity = isOn(l, "laser") ? 5 * laserOutput(st.batt[battKey(l)] ?? 1, t) : 0;
   }
+
   function saveBatt() {
     try {
       localStorage.setItem(BATT_LS, JSON.stringify(st.batt));
@@ -889,10 +986,11 @@ async function boot(def, lib) {
       return;
     }
     for (const l of all) st.batt[battKey(l)] = 1;
-    audio.batteryChange?.() ?? audio.click();
+    const cells = [...new Set(all.map((l) => powerOf(l).cells))];
+    audio.batteryChange ? audio.batteryChange(cells[0]) : audio.click();
     saveBatt();
     lensGlow();
-    ui?.toast("Батареи заменены: CR123A, 100 %");
+    ui?.toast("Батареи заменены: " + cells.join(", ") + " — 100 %");
     ui?.hud();
   }
   // which: "main" — основной (C/Z): выключает все излучатели типа или включает первый заряженный;
@@ -1027,23 +1125,25 @@ async function boot(def, lib) {
     if (TRACE_MODES.includes(tm)) st.trace = tm;
   } catch (e) {
   }
-  /* ---------------------------------------------------------- время суток */
-  const TIME_ORDER = ["day", "dusk", "night"], TIME_LABEL = { day: "День", dusk: "Сумерки", night: "Ночь" };
-  function setTime(m) {
-    S.setTime(m);
-    fx.timeOfDay = m;
+  /* ---------------------------------------------------------- освещение тира: день / ночь */
+  const TIME_LABEL = { day: "День", night: "Ночь" };
+  function setNight(on, silent) {
+    st.night = !!on;
+    S.setNight(st.night);
+    fx.night = st.night;
     try {
-      localStorage.setItem("gunsmith:time", m);
+      localStorage.setItem("gunsmith:night", st.night ? "1" : "0");
     } catch (e) {
+    }
+    if (!silent) {
+      audio.lightSwitch ? audio.lightSwitch() : audio.click();
+      ui?.toast(st.night ? "Ночь: освещение тира выключено" + (lights.length ? "" : " — поставьте фонарь") : "День: освещение тира включено");
     }
     app?.invalidate?.();
     ui?.hud();
   }
   function cycleTime() {
-    const m = TIME_ORDER[(TIME_ORDER.indexOf(S.time) + 1) % TIME_ORDER.length];
-    setTime(m);
-    audio.click();
-    ui?.toast("Время суток: " + TIME_LABEL[m] + (m === "night" && !lights.length ? " — поставьте фонарь" : ""));
+    setNight(!st.night);
   }
   function toggleBipod() {
     const b = asm.withInfo("bipod")[0];
@@ -1232,6 +1332,7 @@ async function boot(def, lib) {
     KeyG: (e) => e?.shiftKey ? cycleReticleColor() : cycleReticle(),
     KeyY: cycleTrace,
     KeyL: cycleTime,
+    KeyQ: () => app.cycleQuality?.(),
     KeyU: replaceBatteries,
     KeyB: toggleBipod,
     KeyK: toggleFold,
@@ -1464,24 +1565,47 @@ async function boot(def, lib) {
     gun.updateMatrixWorld(true);
     drainBatteries(dt);
     // каждый включённый излучатель — свой луч (до двух фонарей и двух ЛЦУ)
-    let ti = 0;
+    const tNow = performance.now() / 1e3;
+    let ti = 0, beamE = 0;
     for (const L of lights) {
       if (!isOn(L, "light") || ti > 1) continue;
       const p = L.obj.localToWorld(new THREE8.Vector3(...L.data.p));
       const dv = new THREE8.Vector3(1, 0, 0).transformDirection(L.obj.matrixWorld);
-      fx.setLight(true, p, dv, lightSpec(L), battLevel(st.batt[battKey(L)] ?? 1), S.beamK ?? 0.06, S.camera, ti++);
+      const b = beamOf(L.data);
+      b.cd = b.candela * LUX;
+      const lo = lightOutput(st.batt[battKey(L)] ?? 1, powerOf(L).driver, tNow + ti * 3.7);
+      ray.set(p, dv);
+      ray.far = 150;
+      const h = ray.intersectObjects(S.range.hitables, false)[0];
+      const dist = h ? h.distance : 150;
+      fx.setLight({ pos: p, dir: dv, beam: b, k: lo.k, warm: lo.warm, dist, hit: h?.point, hitColor: h?.object.material?.color, cam: S.camera, exposure: st.exposure }, ti++);
+      // освещённость в кадре от пятна — для адаптации глаза
+      const half = Math.tan(S.camera.fov * D2R2 / 2);
+      const cover = Math.min(1, (Math.tan(b.hot * 1.6) / half) ** 2);
+      const E = b.cd * lo.k / Math.max(0.35, dist) ** 2;
+      beamE += E * 0.5 * (cover + b.spillK) + E * 0.6 * 0.35;
     }
-    for (; ti < 2; ti++) fx.setLight(false, null, null, null, 0, 0, null, ti);
+    for (; ti < 2; ti++) fx.setLight(null, ti);
     let zi = 0;
     for (const L of lasers) {
       if (!isOn(L, "laser") || zi > 1) continue;
       const p = L.obj.localToWorld(new THREE8.Vector3(...L.data.p));
       const dv = new THREE8.Vector3(1, 0, 0).transformDirection(L.obj.matrixWorld);
-      fx.setLaserLevel(battLevel(st.batt[battKey(L)] ?? 1), S.beamK ?? 0.06, zi);
-      fx.setLaser(true, p, dv, S.range.hitables, L.data.color ?? 16722458, zi++);
+      const zk = laserOutput(st.batt[battKey(L)] ?? 1, tNow + zi * 2.3);
+      fx.setLaser({ pos: p, dir: dv, hitables: S.range.hitables, color: L.data.color ?? 16722458, k: zk, night: st.night }, zi++);
     }
-    for (; zi < 2; zi++) fx.setLaser(false, null, null, null, 0, zi);
-    fx.timeOfDay = S.time;
+    for (; zi < 2; zi++) fx.setLaser(null, zi);
+    // адаптация глаза: к темноте — секунды, к яркому — доли секунды
+    const amb = S.ambient();
+    const Lsc = amb * 0.5 + beamE;
+    st.expTarget = clamp(Math.pow(1.2 / Math.max(1e-5, Lsc), 0.62), 0.32, 11);
+    const nvOn = document.body.classList.contains("nv");
+    const tgt = st.expTarget * (nvOn ? 18 : 1);
+    const tau = tgt > st.exposure ? 2.2 : 0.22;
+    st.exposure += (tgt - st.exposure) * (1 - Math.exp(-dt / tau));
+    if (Math.abs(tgt - st.exposure) < 1e-3) st.exposure = tgt;
+    S.renderer.toneMappingExposure = st.exposure;
+    fx.setAmbient(amb / 2.2);
     ball.update(dt, S.range.hitables, fx.wind);
     fx.bullets(ball.list, st.trace, S.camera);
     fx.update(dt, (s, n) => audio.casing(0, s.kind, n > 1 ? 0.35 : 0.8), S.camera, fx.heat > 0.3 ? muzzleWorld(mzTmp) : null);
@@ -1530,11 +1654,11 @@ async function boot(def, lib) {
     replaceBatteries,
     battInfo,
     cycleTime,
-    setTime,
+    setNight,
     get time() {
-      return S.time;
+      return st.night ? "night" : "day";
     },
-    timeLabel: () => TIME_LABEL[S.time],
+    timeLabel: () => TIME_LABEL[st.night ? "night" : "day"],
     toggleBipod,
     toggleFold,
     toggleMag,
@@ -1561,12 +1685,12 @@ async function boot(def, lib) {
     }
   }
   {
-    let tm = qs.get("time");
+    let tm = qs.get("time") || qs.get("night");
     try {
-      tm = tm || localStorage.getItem("gunsmith:time");
+      tm = tm || (localStorage.getItem("gunsmith:night") === "1" ? "night" : "day");
     } catch (e) {
     }
-    S.setTime(TIME_ORDER.includes(tm) ? tm : "day");
+    setNight(tm === "night" || tm === "1", true);
   }
   applyConfig(def.defaults, { init: true });
   app.defaultStats = { ...st.stats };
@@ -1611,9 +1735,57 @@ async function boot(def, lib) {
   app.invalidate = () => {
     sceneDirty = true;
   };
-  const maxDpr = Math.min(devicePixelRatio || 1, 2);
-  const minDpr = Math.max(0.6, maxDpr * 0.55);
-  let activeDpr = maxDpr, curDpr = maxDpr, fts = [], ftT = 0, slowStreak = 0;
+  /* ---------------------------------------------------------- качество картинки */
+  // Стартовый уровень — по видеокарте: программный рендер и телефоны — «низкое», встроенная графика —
+  // «среднее», дискретная — «высокое» (исходная картинка). Дальше уровень подстраивается по времени
+  // кадра: сначала снижается плотность пикселей, потом уровень. Q — авто/высокое/среднее/низкое.
+  function gpuTier() {
+    try {
+      const gl = R4.getContext(), ext = gl.getExtension("WEBGL_debug_renderer_info");
+      const r = String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER)).toLowerCase();
+      if (/swiftshader|llvmpipe|softpipe|basic render|software/.test(r)) return 0;
+      if (/android|iphone|ipad|mobile/i.test(navigator.userAgent)) return 0;
+      if ((navigator.deviceMemory || 8) <= 2 || (navigator.hardwareConcurrency || 8) <= 2) return 0;
+      if (/intel|uhd|hd graphics|iris|mali|adreno|powervr|radeon\(tm\) graphics|vega \d+ graphics/.test(r)) return 1;
+      if ((navigator.deviceMemory || 8) <= 4 || (navigator.hardwareConcurrency || 8) <= 4) return 1;
+      return 2;
+    } catch (e) {
+      return 1;
+    }
+  }
+  const Q_MODES = ["auto", "high", "mid", "low"], Q_LABEL = { auto: "авто", high: "высокое", mid: "среднее", low: "низкое" };
+  const Q_INDEX = { low: 0, mid: 1, high: 2 };
+  let qMode = qs.get("q");
+  try {
+    qMode = qMode || localStorage.getItem("gunsmith:quality");
+  } catch (e) {
+  }
+  if (!Q_MODES.includes(qMode)) qMode = "auto";
+  const qAuto = gpuTier();
+  let qLevel = qMode === "auto" ? qAuto : Q_INDEX[qMode];
+  let maxDpr = 1, minDpr = 0.6, fastStreak = 0;
+  function applyQuality(i) {
+    qLevel = i;
+    const q = S.setQuality(i);
+    fx.setQuality(q);
+    maxDpr = Math.min(devicePixelRatio || 1, q.dpr);
+    minDpr = Math.max(0.6, maxDpr * 0.6);
+    activeDpr = Math.min(Math.max(activeDpr, minDpr), maxDpr);
+    R4.shadowMap.needsUpdate = true;
+    sceneDirty = true;
+  }
+  function cycleQuality() {
+    qMode = Q_MODES[(Q_MODES.indexOf(qMode) + 1) % Q_MODES.length];
+    try {
+      localStorage.setItem("gunsmith:quality", qMode);
+    } catch (e) {
+    }
+    activeDpr = 9;
+    applyQuality(qMode === "auto" ? qAuto : Q_INDEX[qMode]);
+    ui?.toast("Качество: " + Q_LABEL[qMode] + (qMode === "auto" ? " (" + S.quality.label.toLowerCase() + ")" : ""));
+  }
+  let activeDpr = 9, curDpr = R4.getPixelRatio(), fts = [], ftT = 0, slowStreak = 0;
+  applyQuality(qLevel);
   const bootT = performance.now();
   const gunPrev = new THREE8.Matrix4();
   const setDpr = (v) => {
@@ -1621,6 +1793,7 @@ async function boot(def, lib) {
     curDpr = v;
     R4.setPixelRatio(v);
     R4.setSize(innerWidth, innerHeight);
+    S.resize();
   };
   function simBusy() {
     const r = st.rec;
@@ -1641,27 +1814,39 @@ async function boot(def, lib) {
     let next = activeDpr;
     if (med > 1 / 40) {
       slowStreak++;
+      fastStreak = 0;
       next = Math.max(minDpr, activeDpr * (med > 1 / 25 ? 0.8 : 0.9));
     } else {
       slowStreak = 0;
-      if (med < 1 / 55) next = Math.min(maxDpr, activeDpr * 1.1);
-    }
-    if (slowStreak >= 3 && activeDpr <= minDpr + 1e-3 && S.sun.shadow.mapSize.x > 1024) {
-      S.sun.shadow.mapSize.set(1024, 1024);
-      S.sun.shadow.map?.dispose();
-      S.sun.shadow.map = null;
-      R4.shadowMap.needsUpdate = true;
+      if (med < 1 / 55) {
+        next = Math.min(maxDpr, activeDpr * 1.1);
+        fastStreak++;
+      } else fastStreak = 0;
     }
     activeDpr = next;
+    // в режиме «авто»: упёрлись в минимальную плотность — уровень ниже; стабильно быстро — выше
+    if (qMode === "auto" && slowStreak >= 3 && activeDpr <= minDpr + 1e-3 && qLevel > 0) {
+      slowStreak = 0;
+      applyQuality(qLevel - 1);
+      activeDpr = maxDpr;
+    } else if (qMode === "auto" && fastStreak >= 6 && activeDpr >= maxDpr - 1e-3 && qLevel < qAuto) {
+      fastStreak = 0;
+      applyQuality(qLevel + 1);
+    }
   }
   // пошаговый кадр для отладки и скриншотов (при window.__pause основной цикл стоит)
   app.step = (dt = 1 / 60, n = 1) => {
     for (let i = 0; i < n; i++) update(dt);
     gun.updateMatrixWorld();
     R4.shadowMap.needsUpdate = true;
-    R4.render(S.scene, S.camera);
+    S.render();
   };
-  app.quality = () => ({ activeDpr, curDpr, maxDpr, shadow: S.sun.shadow.mapSize.x });
+  app.quality = () => ({ mode: qMode, level: S.quality.id, auto: qAuto, activeDpr, curDpr, maxDpr, shadow: S.sun.shadow.mapSize.x });
+  app.cycleQuality = cycleQuality;
+  app.setQuality = (m) => {
+    qMode = Q_MODES[(Q_MODES.indexOf(m) + Q_MODES.length - 1) % Q_MODES.length];
+    cycleQuality();
+  };
   const loop = () => {
     requestAnimationFrame(loop);
     if (window.__pause) return;
@@ -1686,7 +1871,7 @@ async function boot(def, lib) {
     gunPrev.copy(gun.matrixWorld);
     camDirty = false;
     sceneDirty = false;
-    R4.render(S.scene, S.camera);
+    S.render();
   };
   loop();
   return app;

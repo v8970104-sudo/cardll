@@ -1,2 +1,3 @@
-var LIB = [...OPTICS, ...DOVETAIL, ...MUZZLES, ...TACTICAL, ...PISTOL, ...GRIPS];
-
+// Единая библиотека модулей для всех стволов. Совместимость решают категория, планка и fit/only:
+// прицелы, фонари, ЛЦУ и рукоятки ставятся на любую подходящую планку, дульные — по резьбе.
+var LIB = [...OPTICS, ...DOVETAIL, ...MUZZLES, ...MUZZLES2, ...TACTICAL, ...PISTOL, ...GRIPS];

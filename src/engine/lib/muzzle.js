@@ -74,8 +74,37 @@ function brake(ctx, R4) {
   k.add("steel", flutesX(R4, 2, 10, 2, 6, 0.5, { a0: 90 }));
   return { root: k.build("brake"), muzzle: { x: 57, kind: "brake", flash: 0.7 } };
 }
+function rotexV(ctx) {
+  const k = ctx.kit();
+  const R4 = 20, L = 158;
+  k.add("steel", latheX([[0, 0], [0, 10.4], [1, 11], [16, 11], [17, 10], [17, 0]], { seg: 28 }));
+  k.add("steelPark", latheX([[8, 0], [8, 15.2], [10, 17], [34, 17], [35, 18.6], [38, R4 - 0.3], [L - 10, R4], [L - 5, R4 - 1], [L - 1.5, R4 - 3.6], [L, R4 - 5], [L, 5.2], [L - 3, 4.6], [L - 3, 0]], { seg: 52, crease: 30 }));
+  k.add("steelPark", flutesX(17.3, 12, 32, 36, 1.6, 0.9));
+  k.add("steel", ringGrooves(R4, 42, 46, 2, 0.35, { seg: 48 }));
+  k.add("steel", ringGrooves(R4, L - 18, L - 14, 2, 0.35, { seg: 48 }));
+  k.add("steel", T(box(10, 3, 6, { bevel: 0.8 }), { p: [22, -17.8, 0] }));
+  k.add("lensBlack", cylX(5, L - 3.2, L + 0.05, { seg: 20 }));
+  return { root: k.build("rotex"), muzzle: { x: L, kind: "supp", flash: 0.03 } };
+}
+function nt4(ctx) {
+  const k = ctx.kit();
+  const R4 = 19.05, L = 168;
+  k.add("steel", latheX([[0, 0], [0, 10.4], [1, 11], [14, 11], [15, 10], [15, 0]], { seg: 28 }));
+  k.add("cast", latheX([[6, 0], [6, 14.5], [8, 16.5], [30, 16.5], [34, R4 - 0.4], [L - 14, R4], [L - 6, R4 - 2], [L - 2, R4 - 5.5], [L, R4 - 8], [L, 4.8], [L - 2, 4.4], [L - 2, 0]], { seg: 52, crease: 30 }));
+  k.add("cast", flutesX(16.7, 10, 28, 24, 2, 1.1));
+  k.add("steel", T(extrudeZ([[0, -3, 1], [26, -2.4, 1.5], [28, 0, 1], [26, 2.4, 1.5], [0, 3, 1]], 2.6, { bevel: 0.6 }), { p: [8, 0, 17.6] }));
+  k.add("steel", T(cylZ(3, 15.5, 19.4, { seg: 14 }), { p: [10, 0, 0] }));
+  for (let i = 0; i < 8; i++) {
+    const a = i / 8 * Math.PI * 2;
+    k.add("lensBlack", T(cylX(1.3, L - 4, L + 0.05, { seg: 10 }), { p: [0, Math.cos(a) * 8, Math.sin(a) * 8] }));
+  }
+  k.add("lensBlack", cylX(4.6, L - 2.2, L + 0.05, { seg: 20 }));
+  return { root: k.build("nt4"), muzzle: { x: L, kind: "supp", flash: 0.03 } };
+}
 var MUZZLES = [
   { id: "sf_socom556", cat: "muzzle", name: "SureFire SOCOM556-RC2", desc: "Глушитель 5,56, быстросъёмный", fit: { thread: ["1/2x28"] }, stats: { weight: 620, length: 168, loud: -28, flash: -70, "recoilV%": -10, ergo: -8, adsTime: 25, velocity: 6 }, build: (c) => socom(c, { len: 168 }) },
+  { id: "bt_rotex_hk", cat: "muzzle", only: ["m416"], name: "B&T Rotex-V (HK416)", desc: "Штатный глушитель к HK416: ставится на пламегаситель HK, стопорное кольцо", fit: { thread: ["1/2x28"] }, stats: { weight: 560, length: 158, loud: -29, flash: -72, "recoilV%": -11, ergo: -7, adsTime: 22, velocity: 5 }, build: rotexV },
+  { id: "kac_nt4", cat: "muzzle", only: ["m416"], name: "Knight's Armament NT4 QDSS", desc: "Глушитель M27 IAR (USMC, база HK416): быстросъёмный, рычаг-защёлка", fit: { thread: ["1/2x28"] }, stats: { weight: 640, length: 168, loud: -30, flash: -75, "recoilV%": -12, ergo: -8, adsTime: 25, velocity: 6 }, build: nt4 },
   { id: "sf_socom762", cat: "muzzle", name: "SureFire SOCOM762-RC2", desc: "Глушитель 7,62, быстросъёмный", fit: { thread: ["5/8x24"] }, stats: { weight: 720, length: 188, loud: -27, flash: -70, "recoilV%": -12, ergo: -10, adsTime: 30, velocity: 6 }, build: (c) => socom(c, { len: 188 }) },
   { id: "a2_fh", cat: "muzzle", name: "Пламегаситель A2", desc: "Классическая «птичья клетка»", fit: { thread: ["1/2x28"] }, stats: { weight: 50, length: 34, flash: -35, "recoilV%": -3 }, build: a2 },
   { id: "warcomp556", cat: "muzzle", name: "SureFire WarComp 5,56", desc: "Пламегаситель-компенсатор", fit: { thread: ["1/2x28"] }, stats: { weight: 90, length: 49, flash: -45, "recoilV%": -8, "recoilH%": -6, loud: 1 }, build: (c) => warcomp(c, 11) },
@@ -86,5 +115,4 @@ var MUZZLES = [
   { id: "linear762", cat: "muzzle", name: "Линейный компенсатор KAK 7,62", desc: "Уводит газы вперёд: тише для стрелка, чуть больше отдача", fit: { thread: ["5/8x24"] }, stats: { weight: 130, length: 62, flash: -30, loud: -3, "recoilV%": 3 }, build: (c) => linear(c, 7.9) },
   { id: "linear_ak", cat: "muzzle", name: "Линейный компенсатор (АК)", desc: "Уводит газы вперёд: тише для стрелка, чуть больше отдача", fit: { thread: ["m14x1L", "m24x1.5"] }, stats: { weight: 125, length: 62, flash: -30, loud: -3, "recoilV%": 3 }, build: (c) => linear(c, 8.5) }
 ];
-
 

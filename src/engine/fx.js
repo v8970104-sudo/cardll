@@ -7,51 +7,16 @@ function tex(size, draw2) {
   t.colorSpace = THREE6.SRGBColorSpace;
   return t;
 }
-var R2 = Math.random;
-var smooth = (a, b, x) => {
-  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
-  return t * t * (3 - 2 * t);
-};
-function hash2(i, j, seed) {
-  let n = Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(seed, 144665) | 0;
-  n = Math.imul(n ^ n >>> 13, 1274126177);
-  return ((n ^ n >>> 16) >>> 0) / 4294967295;
-}
-function vnoise(x, y, seed) {
-  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
-  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-  const a = hash2(xi, yi, seed), b = hash2(xi + 1, yi, seed), c = hash2(xi, yi + 1, seed), d = hash2(xi + 1, yi + 1, seed);
-  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
-}
-function fbm2(x, y, seed, oct = 4) {
-  let s = 0, amp = 0.5, f = 1, norm = 0;
-  for (let o = 0; o < oct; o++) {
-    s += amp * vnoise(x * f, y * f, seed + o * 31);
-    norm += amp;
-    amp *= 0.5;
-    f *= 2.03;
-  }
-  return s / norm;
-}
-// Текстура по функции пикселя: fn(u, v) → [r, g, b, a(0…1)]
-function pix(w, h, fn) {
+function texWH(w, h, draw2) {
   const c = document.createElement("canvas");
   c.width = w;
   c.height = h;
-  const g = c.getContext("2d"), img = g.createImageData(w, h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const [r, gg, b, a] = fn((x + 0.5) / w, (y + 0.5) / h);
-    const i = (y * w + x) * 4;
-    img.data[i] = r;
-    img.data[i + 1] = gg;
-    img.data[i + 2] = b;
-    img.data[i + 3] = Math.max(0, Math.min(255, a * 255));
-  }
-  g.putImageData(img, 0, 0);
+  draw2(c.getContext("2d"), w, h);
   const t = new THREE6.CanvasTexture(c);
   t.colorSpace = THREE6.SRGBColorSpace;
   return t;
 }
+var R2 = Math.random;
 var TEX = {};
 function textures() {
   if (TEX.glow) return TEX;
@@ -64,84 +29,109 @@ function textures() {
     g.fillStyle = gr;
     g.fillRect(0, 0, s, s);
   });
-  // Вид «с торца» (так вспышку видит стрелок в прицел): неровные лепестки газовых струй
-  // вокруг горячего ядра. Лепестки мягкие и разной длины — не «звезда» с ровными лучами.
-  const star = (seed, petals) => tex(256, (g, s) => {
-    g.translate(s / 2, s / 2);
-    const n = petals + (seed % 2);
-    for (let i = 0; i < n; i++) {
-      g.save();
-      g.rotate(Math.PI * 2 * i / n + (R2() - 0.5) * 0.6);
-      const L = s * (0.2 + R2() * 0.26), w = s * (0.03 + R2() * 0.035);
-      const gr2 = g.createLinearGradient(0, 0, L, 0);
-      gr2.addColorStop(0, "rgba(255,236,190,.95)");
-      gr2.addColorStop(0.35, "rgba(255,170,70,.55)");
-      gr2.addColorStop(1, "rgba(200,60,10,0)");
+  const flameSide = (o) => texWH(256, 96, (g, w, h) => {
+    g.globalCompositeOperation = "lighter";
+    const env = (u) => Math.pow(Math.sin(Math.PI * Math.min(1, u / o.peak) * 0.5), 0.8) * Math.pow(1 - u, o.taper);
+    for (let i = 0; i < o.n; i++) {
+      const u = Math.pow(R2(), o.bias) * 0.92;
+      const r = h * 0.5 * env(u) * (0.35 + R2() * 0.65);
+      if (r < 1) continue;
+      const x = u * w, y = h / 2 + (R2() - 0.5) * h * 0.5 * env(u);
+      const hot = Math.max(0, 1 - u * 2.2);
+      const gr2 = g.createRadialGradient(x, y, 0, x, y, r);
+      const a = (0.1 + R2() * 0.14) * (1 - u * 0.6);
+      gr2.addColorStop(0, `rgba(255,${Math.round(190 + 60 * hot)},${Math.round(90 + 150 * hot)},${a * 1.6})`);
+      gr2.addColorStop(0.45, `rgba(255,${Math.round(140 + 60 * hot)},${Math.round(40 + 60 * hot)},${a})`);
+      gr2.addColorStop(1, "rgba(255,90,20,0)");
       g.fillStyle = gr2;
       g.beginPath();
-      g.moveTo(0, -w);
-      g.bezierCurveTo(L * 0.35, -w * 1.3, L * 0.7, -w * 0.5, L, (R2() - 0.5) * w);
-      g.bezierCurveTo(L * 0.7, w * 0.5, L * 0.35, w * 1.3, 0, w);
+      g.ellipse(x, y, r * (1.3 + R2()), r, (R2() - 0.5) * 0.6, 0, 7);
       g.fill();
+    }
+    const cr = h * 0.2;
+    const gr = g.createRadialGradient(4, h / 2, 0, 4, h / 2, cr * 2.4);
+    gr.addColorStop(0, "rgba(255,252,235,1)");
+    gr.addColorStop(0.3, "rgba(255,230,160,.7)");
+    gr.addColorStop(1, "rgba(255,160,60,0)");
+    g.fillStyle = gr;
+    g.beginPath();
+    g.ellipse(4, h / 2, cr * 2.4, cr, 0, 0, 7);
+    g.fill();
+    g.globalCompositeOperation = "destination-in";
+    const fx = g.createLinearGradient(0, 0, w, 0);
+    fx.addColorStop(0, "rgba(0,0,0,1)");
+    fx.addColorStop(0.75, "rgba(0,0,0,.9)");
+    fx.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = fx;
+    g.fillRect(0, 0, w, h);
+  });
+  TEX.flameLong = [0, 1, 2].map(() => flameSide({ n: 170, peak: 0.42, taper: 0.8, bias: 1.25 }));
+  TEX.flameShort = [0, 1, 2].map(() => flameSide({ n: 120, peak: 0.25, taper: 1.6, bias: 1.8 }));
+  const star = (petals) => tex(256, (g, s) => {
+    g.translate(s / 2, s / 2);
+    g.globalCompositeOperation = "lighter";
+    const n = petals || 9;
+    const a0 = R2() * 6.28;
+    for (let i = 0; i < n; i++) {
+      const a = a0 + i / n * Math.PI * 2 + (petals ? 0 : (R2() - 0.5) * 0.5);
+      const L = s * (petals ? 0.4 + R2() * 0.08 : 0.2 + R2() * 0.26), wd = s * (petals ? 0.05 : 0.03 + R2() * 0.03);
+      g.save();
+      g.rotate(a);
+      for (let j = 0; j < 5; j++) {
+        const gr2 = g.createLinearGradient(0, 0, L, 0);
+        gr2.addColorStop(0, "rgba(255,244,215,.5)");
+        gr2.addColorStop(0.5, "rgba(255,175,70,.3)");
+        gr2.addColorStop(1, "rgba(255,100,20,0)");
+        g.fillStyle = gr2;
+        const jw = wd * (0.5 + R2() * 0.7), jl = L * (0.6 + R2() * 0.4), dy = (R2() - 0.5) * wd;
+        g.beginPath();
+        g.moveTo(0, dy - jw);
+        g.quadraticCurveTo(jl * 0.55, dy - jw * (0.6 + R2() * 0.6), jl, dy + (R2() - 0.5) * jw);
+        g.quadraticCurveTo(jl * 0.55, dy + jw * (0.6 + R2() * 0.6), 0, dy + jw);
+        g.fill();
+      }
       g.restore();
     }
-    const gr = g.createRadialGradient(0, 0, 0, 0, 0, s * 0.16);
-    gr.addColorStop(0, "rgba(255,252,240,1)");
-    gr.addColorStop(0.45, "rgba(255,214,140,.75)");
+    const gr = g.createRadialGradient(0, 0, 0, 0, 0, s * 0.2);
+    gr.addColorStop(0, "rgba(255,255,240,1)");
+    gr.addColorStop(0.4, "rgba(255,215,130,.75)");
     gr.addColorStop(1, "rgba(255,140,40,0)");
     g.fillStyle = gr;
     g.beginPath();
-    g.arc(0, 0, s * 0.16, 0, 7);
+    g.arc(0, 0, s * 0.2, 0, 7);
     g.fill();
   });
-  TEX.flash = [star(0, 6), star(1, 7), star(2, 5)];
-  // Осевые текстуры: u — вдоль оси канала (0 — дульный срез), v — поперёк.
-  // disk — недорасширенная струя с «бочкой» и диском Маха: узкая, раскалённая, с резким фронтом;
-  // fire — вторичная вспышка (догорание газов в воздухе): рыхлый оранжево-красный факел.
-  TEX.disk = pix(256, 64, (u, v, i) => {
-    const a = Math.abs(v - 0.5) * 2;
-    const env = smooth(0, 0.18, u) * (1 - smooth(0.62, 0.8, u));
-    const w = 0.28 + 0.5 * Math.sin(Math.min(1, u / 0.75) * Math.PI) * 0.55;
-    const core = Math.exp(-Math.pow(a / w, 2.4)) * env;
-    const disk = Math.exp(-Math.pow((u - 0.66) / 0.035, 2)) * Math.exp(-Math.pow(a / 0.55, 2));
-    const I = Math.min(1, core * 0.9 + disk * 0.9);
-    return [255, 214 + 41 * I, 150 + 100 * I * I, I];
-  });
-  const fire = (seed) => pix(256, 128, (u, v) => {
-    const a = Math.abs(v - 0.5) * 2;
-    const n = fbm2(u * 5, v * 3, seed, 4), n2 = fbm2(u * 11 + 3, v * 7, seed + 9, 3);
-    const w = (0.22 + 0.7 * Math.pow(Math.sin(Math.min(1, u) * Math.PI), 0.9)) * (0.75 + 0.45 * n);
-    const env = smooth(0, 0.2, u) * (1 - smooth(0.5 + 0.3 * n, 1, u));
-    const d = Math.max(0, 1 - Math.pow(a / w, 1.6)) * env;
-    const I = Math.min(1, Math.pow(d, 1.3) * (0.6 + 0.7 * n2));
-    return [255, 90 + 150 * I, 25 + 110 * I * I, I];
-  });
-  TEX.fire = [fire(3), fire(7)];
-  // Дым бездымного пороха: полупрозрачные рваные клубы (fbm), без жёсткого края.
-  // Атлас 2×2, у каждого кадра своя форма. Цвет белый — оттенок и освещённость задаёт шейдер.
-  TEX.smoke = (() => {
-    const S2 = 256, h = S2 / 2, c = document.createElement("canvas");
-    c.width = c.height = S2;
-    const g = c.getContext("2d"), img = g.createImageData(S2, S2);
-    for (let f = 0; f < 4; f++) {
-      const ox = f % 2 * h, oy = (f >> 1) * h, sd = 11 + f * 17;
-      for (let y = 0; y < h; y++) for (let x = 0; x < h; x++) {
-        const u = x / h, v = y / h, dx = u - 0.5, dy = v - 0.5;
-        const r = Math.hypot(dx, dy) * 2;
-        const n = fbm2(u * 4 + f * 3.1, v * 4, sd, 5);
-        const edge = 1 - smooth(0.35 + 0.4 * n, 1, r + 0.25 * (n - 0.5));
-        const dens = Math.min(1, Math.max(0, n - 0.18) * 2.6) * edge;
-        const i = ((oy + y) * S2 + ox + x) * 4;
-        const shade = 0.8 + 0.2 * fbm2(u * 9, v * 9, sd + 5, 3) - 0.12 * dy;
-        img.data[i] = img.data[i + 1] = img.data[i + 2] = Math.min(255, 255 * shade);
-        img.data[i + 3] = Math.min(255, 255 * dens);
+  TEX.star = [star(0), star(0), star(0)];
+  TEX.star3 = [star(3), star(3)];
+  TEX.star4 = [star(4), star(4)];
+  TEX.smoke = tex(256, (g, s) => {
+    const h = s / 2, img = g.createImageData(s, s), d = img.data;
+    const N = 32, grid = [];
+    for (let i = 0; i < 4 * N * N; i++) grid.push(R2());
+    const vn = (c, x, y) => {
+      const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+      const at = (a, b) => grid[c * N * N + (b % N + N) % N * N + (a % N + N) % N];
+      const sx = xf * xf * (3 - 2 * xf), sy = yf * yf * (3 - 2 * yf);
+      return (at(xi, yi) * (1 - sx) + at(xi + 1, yi) * sx) * (1 - sy) + (at(xi, yi + 1) * (1 - sx) + at(xi + 1, yi + 1) * sx) * sy;
+    };
+    for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+      const c = (x >= h ? 1 : 0) + (y >= h ? 2 : 0);
+      const u = x % h / h - 0.5, v = y % h / h - 0.5;
+      let f = 0, amp = 0.5, fr = 3;
+      for (let o = 0; o < 5; o++) {
+        f += vn(c, u * fr + 7 * c, v * fr) * amp;
+        amp *= 0.5;
+        fr *= 2.03;
       }
+      const r = Math.hypot(u, v) * 2;
+      const fall = Math.max(0, 1 - r * r) ** 1.4;
+      const a = Math.max(0, f - 0.32) * 1.9 * fall;
+      const i = (y * s + x) * 4;
+      d[i] = d[i + 1] = d[i + 2] = 255 * (0.85 + f * 0.15);
+      d[i + 3] = Math.min(255, a * 255);
     }
     g.putImageData(img, 0, 0);
-    const t = new THREE6.CanvasTexture(c);
-    t.colorSpace = THREE6.SRGBColorSpace;
-    return t;
-  })();
+  });
   TEX.spark = tex(64, (g, s) => {
     const gr = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
     gr.addColorStop(0, "rgba(255,250,230,1)");
@@ -159,9 +149,172 @@ function textures() {
     g.fillStyle = gr;
     g.fillRect(0, 0, s, s);
   });
+  TEX.glare = tex(256, (g, s) => {
+    const c = s / 2;
+    g.globalCompositeOperation = "lighter";
+    let gr = g.createRadialGradient(c, c, 0, c, c, c);
+    gr.addColorStop(0, "rgba(255,255,255,1)");
+    gr.addColorStop(0.04, "rgba(255,255,255,.9)");
+    gr.addColorStop(0.12, "rgba(255,250,240,.35)");
+    gr.addColorStop(0.35, "rgba(255,245,230,.08)");
+    gr.addColorStop(1, "rgba(255,240,220,0)");
+    g.fillStyle = gr;
+    g.fillRect(0, 0, s, s);
+    g.translate(c, c);
+    for (let i = 0; i < 6; i++) {
+      g.save();
+      g.rotate(i * Math.PI / 3 + 0.2);
+      const lg = g.createLinearGradient(0, 0, c, 0);
+      lg.addColorStop(0, "rgba(255,255,255,.55)");
+      lg.addColorStop(1, "rgba(255,255,255,0)");
+      g.fillStyle = lg;
+      g.beginPath();
+      g.moveTo(0, -1.6);
+      g.lineTo(c, 0);
+      g.lineTo(0, 1.6);
+      g.fill();
+      g.restore();
+    }
+  });
   return TEX;
 }
 var additive = (map, color, opacity = 1) => new THREE6.SpriteMaterial({ map, color, transparent: true, opacity, blending: THREE6.AdditiveBlending, depthWrite: false, toneMapped: false });
+var LIT = {
+  uAmb: { value: new THREE6.Color(1, 1, 1) },
+  uSpotPos: { value: new THREE6.Vector3() },
+  uSpotDir: { value: new THREE6.Vector3(1, 0, 0) },
+  uSpotCol: { value: new THREE6.Color(0, 0, 0) },
+  uSpotProf: { value: new THREE6.Vector3(0.08, 0.55, 0.035) },
+  // σ пятна, край засветки (рад), уровень засветки
+  uFlashPos: { value: new THREE6.Vector3() },
+  uFlashCol: { value: new THREE6.Color(0, 0, 0) }
+};
+var LIT_GLSL = `
+uniform vec3 uAmb, uSpotPos, uSpotDir, uSpotCol, uSpotProf, uFlashPos, uFlashCol;
+float beamProf(float ang) {
+  return exp(-(ang * ang) / (uSpotProf.x * uSpotProf.x)) + uSpotProf.z * (1.0 - smoothstep(uSpotProf.y * 0.72, uSpotProf.y, ang));
+}
+// Хеньи–Гринстейн, нормирована к 1 в среднем по сфере
+float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / pow(max(1e-4, 1.0 + g2 - 2.0 * g * c), 1.5); }
+vec3 spotAt(vec3 p, float g) {
+  vec3 d = p - uSpotPos; float r2 = max(dot(d, d), 4e-4); vec3 n = d * inversesqrt(r2);
+  float ang = acos(clamp(dot(n, uSpotDir), -1.0, 1.0));
+  return uSpotCol * beamProf(ang) / r2 * hg(dot(n, normalize(cameraPosition - p)), g);
+}
+vec3 flashAt(vec3 p) { vec3 d = p - uFlashPos; return uFlashCol / max(dot(d, d), 0.01); }
+`;
+function beamProfile(b, ang) {
+  const hot = Math.exp(-(ang * ang) / (b.hot * b.hot));
+  const edge = 1 - smooth(b.spill * 0.72, b.spill, ang);
+  const ring = (b.ring || 0) * Math.exp(-(((ang - b.hot * 1.9) / (b.hot * 0.5)) ** 2));
+  return hot + b.spillK * edge + ring;
+}
+var smooth = (a, b, x) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+var COOKIES = /* @__PURE__ */ new Map();
+function beamCookie(b) {
+  const key = [b.hot, b.spill, b.spillK, b.ring, b.tir].join("|");
+  if (COOKIES.has(key)) return COOKIES.get(key);
+  const S = 256, c = document.createElement("canvas");
+  c.width = c.height = S;
+  const g = c.getContext("2d"), img = g.createImageData(S, S), d = img.data;
+  const tanA = Math.tan(b.spill * 1.02);
+  let s = 1234;
+  const rnd = () => (s = s * 16807 % 2147483647) / 2147483647;
+  const ph = [0, 1, 2, 3, 4].map(() => rnd() * 6.28);
+  let peak = 0;
+  const vals = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const u = (x + 0.5) / S * 2 - 1, v = (y + 0.5) / S * 2 - 1;
+    const rho = Math.hypot(u, v), a = Math.atan2(v, u);
+    const ang = Math.atan(rho * tanA);
+    let val = beamProfile(b, ang);
+    const k = b.tir ? 0.25 : 1;
+    val *= 1 + k * (0.05 * Math.sin(ang * 90 + ph[0]) * smooth(b.hot, b.hot * 2, ang) + 0.035 * Math.sin(a * 3 + ph[1]) * smooth(b.hot * 0.5, b.hot * 1.5, ang) + 0.02 * Math.sin(a * 7 + ph[2]));
+    if (!b.tir) val *= 1 - 0.18 * Math.exp(-(((ang - b.spill * 0.55) / (b.spill * 0.05)) ** 2));
+    vals[y * S + x] = Math.max(0, val);
+    if (rho < 0.02) peak = Math.max(peak, val);
+  }
+  for (let i = 0; i < S * S; i++) {
+    const q = Math.min(255, Math.round((vals[i] / (peak || 1)) ** (1 / 2.2) * 255));
+    d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = q;
+    d[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE6.CanvasTexture(c);
+  t.colorSpace = THREE6.SRGBColorSpace;
+  COOKIES.set(key, t);
+  return t;
+}
+var CONE_VS = `
+varying vec3 vW;
+void main() { vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`;
+var CONE_FS = `
+uniform float uTan, uLen, uDensity, uTime, uInside;
+varying vec3 vW;
+${LIT_GLSL}
+float h3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float n3(vec3 x) {
+  vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(h3(i), h3(i + vec3(1, 0, 0)), f.x), mix(h3(i + vec3(0, 1, 0)), h3(i + vec3(1, 1, 0)), f.x), f.y),
+             mix(mix(h3(i + vec3(0, 0, 1)), h3(i + vec3(1, 0, 1)), f.x), mix(h3(i + vec3(0, 1, 1)), h3(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+void main() {
+  vec3 ro = cameraPosition, rd = normalize(vW - ro);
+  vec3 A = uSpotPos, V = uSpotDir;
+  float c2 = 1.0 / (1.0 + uTan * uTan);
+  vec3 co = ro - A;
+  float dv = dot(rd, V), cv = dot(co, V);
+  float a = dv * dv - c2, b = 2.0 * (dv * cv - c2 * dot(rd, co)), c = cv * cv - c2 * dot(co, co);
+  float disc = max(b * b - 4.0 * a * c, 0.0), sq = sqrt(disc);
+  float t1 = (-b - sq) / (2.0 * a), t2 = (-b + sq) / (2.0 * a);
+  if (t1 > t2) { float t = t1; t1 = t2; t2 = t; }
+  float tn = 0.0, tf = 1e4;
+  if (a < 0.0) { tn = t1; tf = t2; } else { if (dv > 0.0) { tn = t2; } else { tf = t1; } }
+  // срез по длине луча: 0 ≤ h ≤ uLen
+  if (abs(dv) > 1e-5) { float ta = -cv / dv, tb = (uLen - cv) / dv; tn = max(tn, min(ta, tb)); tf = min(tf, max(ta, tb)); }
+  tn = max(tn, 0.0);
+  if (tf <= tn) discard;
+  const int N = STEPS;
+  float dt = (tf - tn) / float(N);
+  float j = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < N; i++) {
+    vec3 p = ro + rd * (tn + (float(i) + j) * dt);
+    float dens = uDensity * (0.55 + 0.9 * n3(p * 2.3 + vec3(0.0, uTime * 0.04, uTime * 0.02)));
+    acc += spotAt(p, 0.72) * dens;
+  }
+  acc *= dt;
+  gl_FragColor = vec4(acc, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
+var MOTE_VS = `
+attribute float aSeed;
+uniform float uTime, uSize, uGain;
+uniform vec3 uBoxMin, uBoxMax;
+varying vec3 vL;
+${LIT_GLSL}
+void main() {
+  vec3 box = uBoxMax - uBoxMin;
+  vec3 p = position + vec3(0.012, -0.004, 0.008) * uTime + 0.03 * sin(vec3(uTime * 0.21, uTime * 0.17, uTime * 0.23) + aSeed * vec3(12.9, 78.2, 37.7));
+  p = uBoxMin + mod(p - uBoxMin, box);
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = clamp(uSize * (0.5 + aSeed) / -mv.z, 1.0, 6.0);
+  vL = spotAt(p, 0.8) * uGain * (0.3 + aSeed * aSeed);
+}`;
+var MOTE_FS = `
+varying vec3 vL;
+void main() {
+  float d = length(gl_PointCoord - 0.5);
+  float a = smoothstep(0.5, 0.1, d);
+  gl_FragColor = vec4(vL * a, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
 var VS = `
 attribute vec3 iPos;
 attribute vec4 iData;   // размер, поворот, альфа, кадр атласа
@@ -169,19 +322,9 @@ attribute vec4 iCol;    // цвет + растяжение (искры)
 varying vec2 vUv;
 varying float vA;
 varying vec3 vC;
-#ifdef LIT
-// Дым не светится сам: он рассеивает свет сцены. Окружение (по времени суток), вспышка выстрела,
-// дежурный фонарь и лучи оружейных фонарей — точечные/конусные источники, освещённость в вершине.
-uniform vec3 uAmb;
-uniform vec4 uFlash;      // xyz — точка, w — сила
-uniform vec3 uFlashCol;
-uniform vec4 uLamp;
-uniform vec3 uLampCol;
-uniform vec4 uTorchP[2];  // xyz — линза, w — сила
-uniform vec4 uTorchD[2];  // xyz — ось, w — cos полуугла
-uniform vec3 uTorchC[2];
-#endif
+varying vec3 vL;
 #include <fog_pars_vertex>
+${LIT_GLSL}
 void main() {
   vec4 mvPosition = modelViewMatrix * vec4(iPos, 1.0);
   float c = cos(iData.y), s = sin(iData.y);
@@ -194,18 +337,9 @@ void main() {
   vA = iData.z;
   vC = iCol.rgb;
   #ifdef LIT
-  vec3 L = uAmb;
-  vec3 d = iPos - uFlash.xyz;
-  L += uFlashCol * uFlash.w / (1.0 + 60.0 * dot(d, d));
-  d = iPos - uLamp.xyz;
-  L += uLampCol * uLamp.w / (1.0 + dot(d, d));
-  for (int i = 0; i < 2; i++) {
-    vec3 v = iPos - uTorchP[i].xyz;
-    float dd = max(dot(v, v), 1e-6);
-    float cs = dot(v * inversesqrt(dd), uTorchD[i].xyz);
-    L += uTorchC[i] * uTorchP[i].w * smoothstep(uTorchD[i].w, mix(uTorchD[i].w, 1.0, 0.4), cs) / max(dd, 0.04);
-  }
-  vC *= L;
+  vL = uAmb + spotAt(iPos, 0.55) + flashAt(iPos);
+  #else
+  vL = vec3(1.0);
   #endif
   #include <fog_vertex>
 }`;
@@ -214,28 +348,16 @@ uniform sampler2D map;
 varying vec2 vUv;
 varying float vA;
 varying vec3 vC;
+varying vec3 vL;
 #include <fog_pars_fragment>
 void main() {
   vec4 t = texture2D(map, vUv);
-  gl_FragColor = vec4(vC * t.rgb, t.a * vA);
+  gl_FragColor = vec4(vC * t.rgb * vL, t.a * vA);
   if (gl_FragColor.a < 0.003) discard;
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
   #include <fog_fragment>
 }`;
-// Общие униформы освещения дыма (один объект на все системы частиц)
-function smokeLightUniforms() {
-  return {
-    uAmb: { value: new THREE6.Color(1, 1, 1) },
-    uFlash: { value: new THREE6.Vector4(0, -100, 0, 0) },
-    uFlashCol: { value: new THREE6.Color(1, 0.62, 0.3) },
-    uLamp: { value: new THREE6.Vector4(0, -100, 0, 0) },
-    uLampCol: { value: new THREE6.Color(1, 0.62, 0.28) },
-    uTorchP: { value: [new THREE6.Vector4(), new THREE6.Vector4()] },
-    uTorchD: { value: [new THREE6.Vector4(1, 0, 0, 0.9), new THREE6.Vector4(1, 0, 0, 0.9)] },
-    uTorchC: { value: [new THREE6.Color(), new THREE6.Color()] }
-  };
-}
 var Particles = class {
   constructor(scene, map, max, o = {}) {
     this.max = max;
@@ -251,12 +373,8 @@ var Particles = class {
     g.setAttribute("iData", this.aData);
     g.setAttribute("iCol", this.aCol);
     g.instanceCount = 0;
-    const uniforms = THREE6.UniformsUtils.merge([THREE6.UniformsLib.fog, { map: { value: null } }]);
+    const uniforms = { ...THREE6.UniformsUtils.merge([THREE6.UniformsLib.fog, { map: { value: null } }]), ...LIT };
     uniforms.map.value = map;
-    // освещение — общие объекты-униформы, не копии: FX обновляет их раз в кадр
-    if (o.light) Object.assign(uniforms, o.light);
-    const defines = { ATLAS: (o.atlas ? 2 : 1).toFixed(1) };
-    if (o.light) defines.LIT = 1;
     const mat = new THREE6.ShaderMaterial({
       uniforms,
       vertexShader: VS,
@@ -265,7 +383,7 @@ var Particles = class {
       depthWrite: false,
       fog: true,
       blending: o.additive ? THREE6.AdditiveBlending : THREE6.NormalBlending,
-      defines
+      defines: { ATLAS: (o.atlas ? 2 : 1).toFixed(1), ...o.additive ? {} : { LIT: 1 } }
     });
     mat.toneMapped = !o.additive;
     this.mesh = new THREE6.Mesh(g, mat);
@@ -275,14 +393,12 @@ var Particles = class {
     this.list = [];
     this.pool = [];
     this.sort = !!o.sort;
-    this._e = new THREE6.Vector3();
   }
-  // p: {pos, vel, life, size, grow, alpha, color, drag, buoy, gravity, turb, rot, spin, frame, stretch, fadeIn, align}
-  // align — вытянуть частицу вдоль экранной проекции скорости (раскалённые крупинки пороха, искры)
+  // p: {pos, vel, life, size, grow, alpha, color, drag, buoy, gravity, turb, rot, spin, frame, stretch, fadeIn}
   add(p) {
     if (this.list.length >= this.max) this.pool.push(this.list.shift());
     const q = this.pool.pop() || {};
-    Object.assign(q, { t: 0, drag: 2, buoy: 0, gravity: 0, rot: R2() * 6.28, spin: (R2() - 0.5) * 1.2, frame: R2() * 4 | 0, stretch: 0, fadeIn: 0.06, grow: 0, turb: 0, align: false, growPow: 0.5 }, p);
+    Object.assign(q, { t: 0, drag: 2, buoy: 0, gravity: 0, rot: R2() * 6.28, spin: (R2() - 0.5) * 1.2, frame: R2() * 4 | 0, stretch: 0, fadeIn: 0.06, grow: 0, turb: 0 }, p);
     q.px = p.pos.x;
     q.py = p.pos.y;
     q.pz = p.pos.z;
@@ -322,28 +438,20 @@ var Particles = class {
       L.sort((a, b) => b.d - a.d);
     }
     const P = this.aPos.array, D = this.aData.array, C = this.aCol.array;
-    const e = this._e, vm = cam?.matrixWorldInverse;
     for (let i = 0; i < L.length; i++) {
       const p = L[i], k = p.t / p.life;
       P[i * 3] = p.px;
       P[i * 3 + 1] = p.py;
       P[i * 3 + 2] = p.pz;
-      D[i * 4] = p.size + p.grow * Math.pow(k, p.growPow);
-      let stretch = p.stretch * (1 - k);
-      if (p.align && vm) {
-        e.set(p.vx, p.vy, p.vz).transformDirection(vm);
-        p.rot = Math.atan2(e.y, e.x);
-        stretch *= Math.hypot(e.x, e.y);
-      }
+      D[i * 4] = p.size + p.grow * Math.sqrt(k);
       D[i * 4 + 1] = p.rot;
       const fin = p.fadeIn > 0 ? Math.min(1, p.t / p.fadeIn) : 1;
-      // облако растёт, но теряет плотность медленнее, чем линейно: дым висит, а тает под конец
-      D[i * 4 + 2] = p.alpha * fin * (1 - k * k) * (1 - k * 0.35);
+      D[i * 4 + 2] = p.alpha * fin * (1 - k) * (1 - k * 0.5);
       D[i * 4 + 3] = p.frame;
       C[i * 4] = p.color[0];
       C[i * 4 + 1] = p.color[1];
       C[i * 4 + 2] = p.color[2];
-      C[i * 4 + 3] = stretch;
+      C[i * 4 + 3] = p.stretch * (1 - k);
     }
     this.mesh.geometry.instanceCount = L.length;
     if (L.length) {
@@ -353,224 +461,6 @@ var Particles = class {
         a.needsUpdate = true;
       }
     }
-  }
-};
-// Осевой элемент вспышки: квад вдоль оси канала, развёрнутый вокруг оси к камере.
-// Факел и «бочка» струи вытянуты вдоль ствола, поэтому спрайт-кружок для них не годится.
-var AX_VS = `
-uniform vec3 C; uniform vec3 A; uniform vec2 S;
-varying vec2 vUv;
-varying float vSide;
-void main() {
-  vec3 toCam = normalize(cameraPosition - C);
-  vec3 side = cross(A, toCam);
-  float sl = length(side);
-  side = sl > 1e-4 ? side / sl : vec3(0.0, 1.0, 0.0);
-  vec3 w = C + A * (position.x * S.x) + side * (position.y * S.y);
-  vUv = uv;
-  // вдоль оси квад вырождается в полоску — гасим его, «с торца» вспышку рисуют спрайты
-  vSide = smoothstep(0.12, 0.45, sl);
-  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
-}`;
-var AX_FS = `
-uniform sampler2D map; uniform vec3 color; uniform float opacity; uniform float flip;
-varying vec2 vUv;
-varying float vSide;
-void main() {
-  vec4 t = texture2D(map, vec2(vUv.x, flip > 0.5 ? 1.0 - vUv.y : vUv.y));
-  gl_FragColor = vec4(color * t.rgb, t.a * opacity * vSide);
-}`;
-var AxialFlash = class {
-  constructor(parent) {
-    this.u = { map: { value: null }, color: { value: new THREE6.Color(1, 1, 1) }, opacity: { value: 1 }, flip: { value: 0 }, C: { value: new THREE6.Vector3() }, A: { value: new THREE6.Vector3(1, 0, 0) }, S: { value: new THREE6.Vector2(1, 1) } };
-    const g = new THREE6.PlaneGeometry(1, 1);
-    this.mesh = new THREE6.Mesh(g, new THREE6.ShaderMaterial({ uniforms: this.u, vertexShader: AX_VS, fragmentShader: AX_FS, transparent: true, depthWrite: false, blending: THREE6.AdditiveBlending, toneMapped: false, side: THREE6.DoubleSide }));
-    this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = 4;
-    this.mesh.visible = false;
-    parent.add(this.mesh);
-  }
-  // center — середина элемента; axis — единичный вектор; len/width — метры
-  set(map, center, axis, len, width, color, opacity) {
-    const u = this.u;
-    u.map.value = map;
-    u.C.value.copy(center);
-    u.A.value.copy(axis);
-    u.S.value.set(len, width);
-    u.color.value.setRGB(color[0], color[1], color[2]);
-    u.opacity.value = opacity;
-    u.flip.value = R2() < 0.5 ? 1 : 0;
-    this.base = opacity;
-    this.mesh.visible = opacity > 1e-3;
-  }
-  hide() {
-    this.mesh.visible = false;
-  }
-};
-// Цветовая температура светодиода → линейный RGB (приближение Таннера Хелланда).
-function kelvinColor(k) {
-  const t = k / 100;
-  let r, g, b;
-  if (t <= 66) {
-    r = 255;
-    g = 99.47 * Math.log(t) - 161.12;
-    b = t <= 19 ? 0 : 138.52 * Math.log(t - 10) - 305.04;
-  } else {
-    r = 329.7 * Math.pow(t - 60, -0.1332);
-    g = 288.12 * Math.pow(t - 60, -0.0755);
-    b = 255;
-  }
-  const c = (v) => Math.min(255, Math.max(0, v)) / 255;
-  return new THREE6.Color().setRGB(c(r), c(g), c(b), THREE6.SRGBColorSpace);
-}
-// Световое пятно отражателя: горячее ядро, тёмное «кольцо» перехода, широкая засветка и
-// слабое внешнее гало от кромки отражателя. Небольшая неровность — след апельсиновой корки.
-function torchCookie(hot, spill) {
-  const S2 = 256, c = document.createElement("canvas");
-  c.width = c.height = S2;
-  const g = c.getContext("2d"), img = g.createImageData(S2, S2);
-  for (let y = 0; y < S2; y++) for (let x = 0; x < S2; x++) {
-    const dx = (x + 0.5) / S2 * 2 - 1, dy = (y + 0.5) / S2 * 2 - 1, r = Math.hypot(dx, dy);
-    const a = Math.atan2(dy, dx);
-    const core = Math.exp(-Math.pow(r / hot, 2.2));
-    const ring = 0.06 * Math.exp(-Math.pow((r - hot * 1.9) / (hot * 0.45), 2));
-    const sp = spill * Math.pow(Math.max(0, 1 - r), 1.4) * (1 - 0.35 * Math.exp(-Math.pow((r - hot * 1.35) / (hot * 0.3), 2)));
-    const halo = 0.005 * Math.exp(-Math.pow((r - 0.86) / 0.08, 2));
-    const orange = 1 + 0.035 * Math.sin(a * 23 + r * 40) * Math.sin(a * 7 - r * 25);
-    const v = Math.min(1, (core + ring + sp + halo) * orange) * (r < 1 ? 1 : 0);
-    const q = Math.pow(v, 1 / 2.2) * 255;
-    const i = (y * S2 + x) * 4;
-    img.data[i] = img.data[i + 1] = img.data[i + 2] = q;
-    img.data[i + 3] = 255;
-  }
-  g.putImageData(img, 0, 0);
-  const t = new THREE6.CanvasTexture(c);
-  t.colorSpace = THREE6.SRGBColorSpace;
-  return t;
-}
-var BEAM_VS = `
-varying vec3 vW;
-void main(){
-  vec4 w = modelMatrix * vec4(position, 1.);
-  vW = w.xyz;
-  gl_Position = projectionMatrix * viewMatrix * w;
-}`;
-// Объёмный луч: по лучу зрения от камеры до задней грани конуса — 28 шагов; в каждой точке
-// рассеяние ∝ I(θ)/t² (профиль пятна как у куки-текстуры). Земля перекрывает луч.
-// Пыль/влага — медленный шум в мировых координатах, чтобы луч «жил».
-var BEAM_FS = `
-uniform vec3 color; uniform float k; uniform float len; uniform float tanA; uniform float hot; uniform float spill;
-uniform float time; uniform vec3 camPos; uniform vec3 O; uniform vec3 D;
-varying vec3 vW;
-float h(vec3 p){ return fract(sin(dot(p, vec3(12.9898,78.233,45.164))) * 43758.5453); }
-float n3(vec3 p){ vec3 i = floor(p), f = fract(p); f = f*f*(3.-2.*f);
-  return mix(mix(mix(h(i), h(i+vec3(1,0,0)), f.x), mix(h(i+vec3(0,1,0)), h(i+vec3(1,1,0)), f.x), f.y),
-             mix(mix(h(i+vec3(0,0,1)), h(i+vec3(1,0,1)), f.x), mix(h(i+vec3(0,1,1)), h(i+vec3(1,1,1)), f.x), f.y), f.z); }
-float groundAt(vec3 p){ return (abs(p.x + .8) < 3. && abs(p.z) < 2.5) ? .12 : 0.; }
-void main(){
-  vec3 rd = vW - camPos; float L = length(rd); rd /= L;
-  float t0 = dot(camPos - O, D), dd = dot(rd, D);
-  float s0 = 0., s1 = L;
-  if (abs(dd) > 1e-4) {
-    float a = (0.02 - t0) / dd, b = (len - t0) / dd;
-    s0 = max(s0, min(a, b)); s1 = min(s1, max(a, b));
-  }
-  if (s1 <= s0) discard;
-  const int N = 28;
-  float ds = (s1 - s0) / float(N);
-  float j = h(vec3(gl_FragCoord.xy, time));
-  float acc = 0.;
-  for (int i = 0; i < N; i++) {
-    vec3 p = camPos + rd * (s0 + (float(i) + j) * ds);
-    if (p.y < groundAt(p)) break;
-    vec3 v = p - O; float t = dot(v, D);
-    if (t <= 0.) continue;
-    float r = length(v - D * t) / (t * tanA);
-    if (r >= 1.) continue;
-    float prof = exp(-pow(r / hot, 2.2)) + spill * pow(1. - r, 1.4);
-    float tt = max(t, .25);
-    float dust = .6 + .55 * n3(p * 1.7 + vec3(time * .05, time * .015, time * .03)) + .3 * n3(p * 7.3 - time * .08);
-    acc += prof / (tt * tt) * dust * ds;
-  }
-  float nearCam = smoothstep(.02, .35, distance(vW, camPos));
-  float a = k * acc;
-  a = a / (1. + a * .6);
-  gl_FragColor = vec4(color * a * nearCam, 1.);
-}`;
-var Torch = class {
-  constructor(scene, T2) {
-    this.spot = new THREE6.SpotLight(16777215, 0, 140, 0.62, 0, 2);
-    this.spot.castShadow = true;
-    this.spot.shadow.mapSize.set(1024, 1024);
-    this.spot.shadow.camera.near = 0.03;
-    this.spot.shadow.camera.far = 140;
-    this.spot.shadow.bias = -2e-4;
-    this.spot.shadow.normalBias = 0.02;
-    this.spot.visible = false;
-    scene.add(this.spot, this.spot.target);
-    this.cookies = new Map();
-    const geo = new THREE6.ConeGeometry(1, 1, 48, 1, true);
-    geo.translate(0, -0.5, 0);
-    geo.rotateZ(Math.PI / 2);
-    this.beamU = { color: { value: new THREE6.Color() }, k: { value: 0 }, len: { value: 40 }, tanA: { value: 0.3 }, hot: { value: 0.3 }, spill: { value: 0.1 }, time: { value: 0 }, camPos: { value: new THREE6.Vector3() }, O: { value: new THREE6.Vector3() }, D: { value: new THREE6.Vector3(1, 0, 0) } };
-    this.beam = new THREE6.Mesh(geo, new THREE6.ShaderMaterial({ uniforms: this.beamU, vertexShader: BEAM_VS, fragmentShader: BEAM_FS, transparent: true, depthWrite: false, blending: THREE6.AdditiveBlending, side: THREE6.BackSide, toneMapped: false, fog: false }));
-    this.beam.frustumCulled = false;
-    this.beam.visible = false;
-    this.beam.renderOrder = 5;
-    scene.add(this.beam);
-    this.glare = new THREE6.Sprite(additive(T2.glow, 16777215, 0));
-    this.glare.visible = false;
-    this.glare.renderOrder = 6;
-    scene.add(this.glare);
-    this.t = 0;
-    this._v = new THREE6.Vector3();
-  }
-  cookie(spec) {
-    const key = spec.hot.toFixed(3) + "|" + spec.spill.toFixed(3);
-    if (!this.cookies.has(key)) this.cookies.set(key, torchCookie(spec.hot, spec.spill));
-    return this.cookies.get(key);
-  }
-  set(on, pos, dir, spec, level, haze, cam) {
-    this.spot.visible = this.beam.visible = this.glare.visible = !!on;
-    if (!on) {
-      this.spot.intensity = 0;
-      return;
-    }
-    const sp = this.spot, a = spec.angle ?? 0.62;
-    if (sp.userData.key !== spec.key) {
-      sp.userData.key = spec.key;
-      sp.map = this.cookie(spec);
-      sp.angle = a;
-      sp.color.copy(kelvinColor(spec.kelvin));
-      this.beamU.color.value.copy(sp.color);
-      this.beamU.tanA.value = Math.tan(a);
-      this.beamU.hot.value = spec.hot;
-      this.beamU.spill.value = spec.spill;
-      this.beamU.len.value = spec.throw;
-      this.beam.scale.set(spec.throw, Math.tan(a) * spec.throw, Math.tan(a) * spec.throw);
-    }
-    // сила света в канделах → единицы сцены (солнце днём ≈2.4)
-    sp.intensity = spec.cd * 0.022 * level;
-    sp.position.copy(pos);
-    sp.target.position.copy(pos).addScaledVector(dir, 10);
-    this.beam.position.copy(pos);
-    this.beam.quaternion.setFromUnitVectors(X_AXIS, dir);
-    this.t += 0.016;
-    this.beamU.time.value = this.t;
-    this.beamU.O.value.copy(pos);
-    this.beamU.D.value.copy(dir);
-    this.beamU.k.value = 1.1e-3 * spec.cd * 0.022 * haze * level;
-    if (cam) this.beamU.camPos.value.copy(cam.position);
-    // блик линзы: виден, когда смотришь в фонарь
-    this.glare.position.copy(pos).addScaledVector(dir, 2e-3);
-    let facing = 0;
-    if (cam) {
-      this._v.copy(cam.position).sub(pos).normalize();
-      facing = Math.max(0, this._v.dot(dir));
-    }
-    const g = Math.pow(facing, 6) * level;
-    this.glare.material.opacity = Math.min(1, 0.25 * level + g * 1.2);
-    this.glare.scale.setScalar(spec.lensR * 2.4 + g * 0.35 * Math.sqrt(spec.cd / 2e4));
   }
 };
 // След пули: квад вдоль отрезка траектории, развёрнутый к камере. Ширина не меньше ≈1 пикселя,
@@ -657,21 +547,132 @@ var Streaks = class {
     }
   }
 };
-// Видимость вспышки и искр по времени суток: днём глаз адаптирован к яркому фону и вспышка
-// выстрела почти не видна; в сумерках и ночью — во всей красе.
-var FLASH_VIS = { day: 0.38, dusk: 0.8, night: 1 };
-var SMOKE_AMB = { day: [0.92, 0.94, 0.98], dusk: [0.34, 0.3, 0.3], night: [0.035, 0.042, 0.06] };
-// Профили дульных устройств: множители осевой вспышки (disk), вторичного факела (fire),
-// вида с торца (star), боковых/верхних струй (jets) и дыма.
-var MUZZLE_FX = {
-  bare: { disk: 1, fire: 1, star: 1, jets: 0, smoke: 1, sparks: 1 },
-  fh: { disk: 0.75, fire: 0.14, star: 0.55, jets: 0, smoke: 0.9, sparks: 0.45, prongs: true },
-  linear: { disk: 0.6, fire: 0.3, star: 0.25, jets: 0, smoke: 0.9, sparks: 0.4 },
-  brake: { disk: 0.7, fire: 0.45, star: 0.8, jets: 1, smoke: 1.25, sparks: 0.8 },
-  comp: { disk: 0.8, fire: 0.6, star: 0.8, jets: 0.8, smoke: 1.1, sparks: 0.8, up: true },
-  supp: { disk: 0, fire: 0, star: 0, jets: 0, smoke: 0.45, sparks: 0 }
+// Световая установка одного фонаря: прожектор с куки-профилем отражателя и тенью, объёмный
+// конус (рассеяние в воздухе), отражённый свет от препятствия и пола, блик линзы.
+// Основная установка пишет в LIT — ею подсвечиваются дым и пылинки; вторая — облегчённая.
+var BeamRig = class {
+  constructor(scene, T2, primary) {
+    this.primary = primary;
+    this.on = false;
+    this.U = primary ? LIT : { ...LIT, uSpotPos: { value: new THREE6.Vector3() }, uSpotDir: { value: new THREE6.Vector3(1, 0, 0) }, uSpotCol: { value: new THREE6.Color(0, 0, 0) }, uSpotProf: { value: new THREE6.Vector3(0.08, 0.55, 0.035) } };
+    this.spot = new THREE6.SpotLight(16777215, 0, 0, 0.55, 0.04, 2);
+    this.spot.castShadow = true;
+    this.spot.shadow.mapSize.set(primary ? 2048 : 1024, primary ? 2048 : 1024);
+    this.spot.shadow.camera.near = 0.02;
+    this.spot.shadow.camera.far = 160;
+    this.spot.shadow.bias = -15e-5;
+    this.spot.shadow.normalBias = 0.012;
+    this.spot.shadow.autoUpdate = false;
+    this.spot.map = beamCookie({ hot: 0.075, spill: 0.55, spillK: 0.035, ring: 0.06 });
+    // второй прожектор добавляется в расчёт освещения только когда включён
+    this.spot.visible = primary;
+    scene.add(this.spot, this.spot.target);
+    if (primary) {
+      this.bounce = new THREE6.PointLight(16777215, 0, 0, 2);
+      this.bounceFloor = new THREE6.PointLight(16777215, 0, 0, 2);
+      scene.add(this.bounce, this.bounceFloor);
+    }
+    this.cone = new THREE6.Mesh(
+      new THREE6.CylinderGeometry(1, 1e-4, 1, 64, 1, true).translate(0, 0.5, 0).rotateZ(-Math.PI / 2),
+      new THREE6.ShaderMaterial({
+        uniforms: { ...this.U, uTan: { value: 0.5 }, uLen: { value: 30 }, uDensity: { value: 2e-3 }, uTime: { value: 0 }, uInside: { value: 0 } },
+        defines: { STEPS: 40 },
+        vertexShader: CONE_VS,
+        fragmentShader: CONE_FS,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE6.AdditiveBlending,
+        side: THREE6.FrontSide
+      })
+    );
+    this.cone.visible = false;
+    this.cone.frustumCulled = false;
+    this.cone.renderOrder = 1;
+    scene.add(this.cone);
+    this.lampGlow = new THREE6.Sprite(additive(T2.glow, 16774886, 0));
+    this.lampGlow.renderOrder = 6;
+    this.glare = new THREE6.Sprite(additive(T2.glare, 16774886, 0));
+    this.glare.renderOrder = 6;
+    scene.add(this.lampGlow, this.glare);
+    this._v = new THREE6.Vector3();
+  }
+  // s: { pos, dir, beam, k — световой поток 0..1, warm, dist — до препятствия по оси, hit, cam, exposure }.
+  // beam: { cd (кд-ед.), hot, spill, spillK, ring, tir, color, lensR }.
+  set(s, haze) {
+    const on = !!s && s.k > 1e-3;
+    this.on = on;
+    this.spot.shadow.autoUpdate = on;
+    this.cone.visible = on;
+    if (!this.primary) this.spot.visible = on;
+    const U = this.U;
+    if (!on) {
+      this.spot.intensity = 0;
+      if (this.bounce) this.bounce.intensity = this.bounceFloor.intensity = 0;
+      this.lampGlow.material.opacity = 0;
+      this.glare.material.opacity = 0;
+      U.uSpotCol.value.setRGB(0, 0, 0);
+      return;
+    }
+    const { pos, dir, beam: b, k } = s;
+    const map = beamCookie(b);
+    if (this.spot.map !== map) this.spot.map = map;
+    this.spot.angle = b.spill * 1.02;
+    const col = this.spot.color.set(b.color ?? 16054015);
+    if (s.warm) col.lerp(WARM, s.warm);
+    this.spot.intensity = b.cd * k;
+    this.spot.position.copy(pos).addScaledVector(dir, 4e-3);
+    this.spot.target.position.copy(pos).addScaledVector(dir, 10);
+    this.spot.target.updateMatrixWorld();
+    U.uSpotPos.value.copy(pos);
+    U.uSpotDir.value.copy(dir);
+    U.uSpotCol.value.copy(col).multiplyScalar(b.cd * k / 2.2);
+    U.uSpotProf.value.set(b.hot, b.spill, b.spillK);
+    if (this.bounce) {
+      if (s.hit) {
+        const flux = b.cd * k * (Math.tan(b.hot) ** 2 + b.spillK * Math.tan(b.spill) ** 2) * 0.4;
+        this.bounce.intensity = flux;
+        this.bounce.color.copy(col).lerp(s.hitColor || col, 0.5);
+        this.bounce.position.copy(s.hit).addScaledVector(dir, -Math.min(0.5, (s.dist ?? 1) * 0.1));
+      } else this.bounce.intensity = 0;
+      if (dir.y < Math.sin(b.spill * 0.8)) {
+        const down = Math.max(0.2, pos.y - 0.02);
+        const a = Math.max(0.05, b.spill * 0.8 + Math.asin(Math.max(-1, Math.min(1, dir.y))));
+        const reach = Math.min(12, down / Math.tan(a));
+        this.bounceFloor.position.copy(pos).addScaledVector(dir, reach * 1.3);
+        this.bounceFloor.position.y = 0.15;
+        this.bounceFloor.intensity = b.cd * k * b.spillK * Math.tan(b.spill) ** 2 * 0.5 * 0.3;
+        this.bounceFloor.color.copy(col);
+      } else this.bounceFloor.intensity = 0;
+    }
+    const L = Math.min(s.dist ?? 60, 80) + 0.3, tn = Math.tan(b.spill);
+    this.cone.position.copy(pos);
+    this.cone.quaternion.setFromUnitVectors(X_AXIS, dir);
+    this.cone.scale.set(L, L * tn, L * tn);
+    const CU = this.cone.material.uniforms;
+    CU.uTan.value = tn;
+    CU.uLen.value = L;
+    CU.uDensity.value = 12e-4 + haze * 0.045;
+    const cam = s.cam;
+    const v = this._v.subVectors(cam.position, pos), vl = v.length(), hh = v.dot(dir);
+    const inside = hh > 0 && hh < L && Math.acos(Math.min(1, hh / vl)) < b.spill;
+    this.cone.material.side = inside ? THREE6.BackSide : THREE6.FrontSide;
+    CU.uInside.value = inside ? 1 : 0;
+    const ang = Math.acos(Math.max(-1, Math.min(1, hh / vl)));
+    const E = b.cd * k * beamProfile(b, ang) / (vl * vl);
+    const g = Math.max(0, Math.min(1, Math.log2(1 + E * (s.exposure ?? 1) * 0.4) / 8));
+    this.glare.position.copy(pos).addScaledVector(dir, 6e-3);
+    this.glare.scale.setScalar(vl * (0.01 + 0.35 * g * g));
+    this.glare.material.opacity = g;
+    this.glare.material.color.copy(col);
+    const face = Math.max(0, Math.cos(Math.min(Math.PI / 2, ang)));
+    this.lampGlow.position.copy(pos).addScaledVector(dir, 3e-3);
+    this.lampGlow.scale.setScalar((b.lensR ?? 0.013) * 2.6);
+    this.lampGlow.material.opacity = Math.min(1, k * (0.25 + 0.75 * face));
+    this.lampGlow.material.color.copy(col);
+  }
 };
 var MAX_SHELLS = 60;
+var WARM = new THREE6.Color(16763274);
 var X_AXIS = new THREE6.Vector3(1, 0, 0);
 var FX = class {
   constructor(scene, mats) {
@@ -679,73 +680,122 @@ var FX = class {
     const T2 = textures();
     this.T = T2;
     this.mats = mats;
-    this.timeOfDay = "day";
-    // вспышка: ядро и вид с торца — спрайты; «бочка» струи, факел и боковые струи — осевые квады
     this.flash = new THREE6.Group();
     this.flash.visible = false;
     scene.add(this.flash);
-    this.flashCore = new THREE6.Sprite(additive(T2.glow, 16770752));
-    this.flashStar = new THREE6.Sprite(additive(T2.flash[0], 16764032));
-    this.flash.add(this.flashCore, this.flashStar);
-    this.axial = [0, 1, 2, 3, 4, 5, 6].map(() => new AxialFlash(scene));
-    this.flashLight = new THREE6.PointLight(16754768, 0, 8, 2);
+    const flameMat = () => new THREE6.MeshBasicMaterial({ map: T2.flameLong[0], transparent: true, blending: THREE6.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE6.DoubleSide, fog: false });
+    const along = new THREE6.PlaneGeometry(1, 1).translate(0.5, 0, 0);
+    this.flameAxis = new THREE6.Group();
+    this.flamePlanes = [0, 1, 2].map(() => {
+      const m = new THREE6.Mesh(along, flameMat());
+      m.renderOrder = 4;
+      m.frustumCulled = false;
+      this.flameAxis.add(m);
+      return m;
+    });
+    const across = new THREE6.PlaneGeometry(1, 1).rotateY(Math.PI / 2);
+    this.flameStar = new THREE6.Mesh(across, flameMat());
+    this.flameStar.renderOrder = 4;
+    this.flameStar.frustumCulled = false;
+    this.flameAxis.add(this.flameStar);
+    this.jets = [0, 1].map(() => {
+      const g = new THREE6.Group();
+      for (let i = 0; i < 2; i++) {
+        const m = new THREE6.Mesh(along, flameMat());
+        m.rotation.x = i * Math.PI / 2;
+        m.renderOrder = 4;
+        m.frustumCulled = false;
+        g.add(m);
+      }
+      this.flameAxis.add(g);
+      return g;
+    });
+    this.flash.add(this.flameAxis);
+    this.flashFade = 1;
+    this.flashLight = new THREE6.PointLight(16754768, 0, 16, 2);
     scene.add(this.flashLight);
-    this.flashAge = 99;
-    this.light = smokeLightUniforms();
-    this.smoke = new Particles(scene, T2.smoke, 480, { atlas: true, sort: true, light: this.light });
+    this.flashT = 0;
+    this.smoke = new Particles(scene, T2.smoke, 420, { atlas: true, sort: true });
     this.fire = new Particles(scene, T2.spark, 260, { additive: true });
-    this.tracers = new Streaks(scene, 64, true);
-    this.traces = new Streaks(scene, 64, false);
-    this.wind = new THREE6.Vector3(0.9, 0, 0.35);
-    this.smokeWind = this.wind.clone().multiplyScalar(0.35);
+    this.wind = new THREE6.Vector3(0.18, 0, 0.1);
     this.noWind = new THREE6.Vector3();
     this.heat = 0;
     this.wispT = 0;
-    this.lastShotT = -99;
-    this.clock = 0;
+    this.haze = 0;
+    this.floorAt = () => 0;
     this.shells = [];
     this.inst = /* @__PURE__ */ new Map();
     this.holes = [];
     this.holeGeo = new THREE6.CircleGeometry(0.012, 12);
     this.holeMat = new THREE6.MeshBasicMaterial({ map: T2.hole, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
+    this.tracers = new Streaks(scene, 64, true);
+    this.traces = new Streaks(scene, 64, false);
+    this.night = false;
+    this._c = new THREE6.Color();
     // до двух ЛЦУ и двух фонарей одновременно — у каждого свой луч
     this.lasers = [0, 1].map(() => {
       const beam = new THREE6.Mesh(
-        new THREE6.CylinderGeometry(6e-4, 14e-4, 1, 6, 1, true).translate(0, 0.5, 0).rotateZ(-Math.PI / 2),
-        new THREE6.MeshBasicMaterial({ color: 16722458, transparent: true, opacity: 0.22, blending: THREE6.AdditiveBlending, depthWrite: false, toneMapped: false })
+        new THREE6.CylinderGeometry(7e-4, 16e-4, 1, 6, 1, true).translate(0, 0.5, 0).rotateZ(-Math.PI / 2),
+        new THREE6.MeshBasicMaterial({ color: 16722458, transparent: true, opacity: 0.2, blending: THREE6.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false })
       );
       beam.visible = false;
       beam.frustumCulled = false;
-      const dot = new THREE6.Sprite(additive(T2.glow, 16724e3, 1));
-      dot.visible = false;
-      scene.add(beam, dot);
-      return { beam, dot, color: null, k: 1 };
+      const dot = new THREE6.Sprite(new THREE6.SpriteMaterial({ map: T2.glow, color: 16724e3, transparent: true, depthWrite: false, toneMapped: false }));
+      const halo = new THREE6.Sprite(additive(T2.glow, 16724e3, 0.3));
+      dot.visible = halo.visible = false;
+      dot.renderOrder = halo.renderOrder = 5;
+      scene.add(beam, dot, halo);
+      return { beam, dot, halo };
     });
-    this.torches = [new Torch(scene, T2), new Torch(scene, T2)];
-    this.torch = this.torches[0];
+    this.rigs = [new BeamRig(scene, T2, true), new BeamRig(scene, T2, false)];
+    {
+      const N = 900, pos = new Float32Array(N * 3), seed = new Float32Array(N);
+      this.moteBox = [new THREE6.Vector3(-0.6, 0.5, -1.6), new THREE6.Vector3(7, 2.8, 1.6)];
+      const [a, b] = this.moteBox;
+      for (let i = 0; i < N; i++) {
+        pos[i * 3] = a.x + R2() * (b.x - a.x);
+        pos[i * 3 + 1] = a.y + R2() * (b.y - a.y);
+        pos[i * 3 + 2] = a.z + R2() * (b.z - a.z);
+        seed[i] = R2();
+      }
+      const g = new THREE6.BufferGeometry();
+      g.setAttribute("position", new THREE6.BufferAttribute(pos, 3));
+      g.setAttribute("aSeed", new THREE6.BufferAttribute(seed, 1));
+      this.motes = new THREE6.Points(g, new THREE6.ShaderMaterial({
+        uniforms: { ...LIT, uTime: { value: 0 }, uSize: { value: 4 }, uGain: { value: 22e-4 }, uBoxMin: { value: a }, uBoxMax: { value: b } },
+        vertexShader: MOTE_VS,
+        fragmentShader: MOTE_FS,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE6.AdditiveBlending
+      }));
+      this.motes.visible = false;
+      this.motes.frustumCulled = false;
+      scene.add(this.motes);
+    }
+    this.time = 0;
+    this.beamOn = false;
     this.ray = new THREE6.Raycaster();
     this._v = new THREE6.Vector3();
     this._v2 = new THREE6.Vector3();
     this._q = new THREE6.Quaternion();
     this._m = new THREE6.Matrix4();
     this._s = new THREE6.Vector3(1, 1, 1);
-    this._c = new THREE6.Color();
   }
   // Что-то ещё движется — кадр нужно перерисовать.
   active() {
-    return this.flashAge < 3 || this.smoke.list.length > 0 || this.fire.list.length > 0 || this.heat > 0.3 || this.tracers.n > 0 || this.traces.n > 0 || this.shells.some((s) => s.alive && !s.rest);
+    return this.flashT > 0 || this.smoke.list.length > 0 || this.fire.list.length > 0 || this.heat > 0.3 || this.shells.some((s) => s.alive && !s.rest) || this.beamOn || this.tracers.n > 0 || this.traces.n > 0;
   }
   smokePuff(pos, vel, o = {}) {
-    const g = o.grey ?? 0.7 + R2() * 0.08;
+    const g = o.grey ?? 0.58 + R2() * 0.1;
     this.smoke.add({
       pos,
       vel,
       life: o.life ?? 1.6 + R2(),
       size: o.size ?? 0.03,
       grow: o.grow ?? 0.3,
-      growPow: o.growPow ?? 0.5,
       alpha: o.alpha ?? 0.35,
-      color: o.color || [g * 0.98, g, g * 1.03],
+      color: o.tint ? [g * 0.96, g * 0.98, g * 1.04] : [g * 1.02, g, g * 0.95],
       drag: o.drag ?? 3.5,
       buoy: o.buoy ?? 0.12,
       turb: o.turb ?? 0.25,
@@ -753,134 +803,92 @@ var FX = class {
       gravity: o.gravity ?? 0
     });
   }
-  // Дульная вспышка и газы. Физика: из дульного среза выходит недорасширенная струя — светящаяся
-  // «бочка» с диском Маха в нескольких калибрах от среза (промежуточная вспышка); дальше горючие
-  // газы (CO, H₂) смешиваются с воздухом и догорают — вторичная вспышка, крупный оранжевый факел.
-  // Пламегаситель срывает вторичную вспышку, ДТК отводит газы вбок, глушитель гасит почти всё.
-  // Длительность — миллисекунды: на экране это 1 полный кадр и 1 кадр догорания.
-  muzzleFlash(pos, dir, kind, size = 1, o = {}) {
-    const P = MUZZLE_FX[kind] || MUZZLE_FX.bare;
-    const supp = kind === "supp";
-    const vis = FLASH_VIS[this.timeOfDay] ?? 1;
-    const now = this.clock;
-    const cold = now - this.lastShotT > 4;
-    this.lastShotT = now;
-    const k = size * (o.barrel ?? 1);
-    const up = this._v2.set(0, 1, 0);
-    const side = new THREE6.Vector3().crossVectors(dir, up).normalize();
-    const vup = new THREE6.Vector3().crossVectors(side, dir).normalize();
-    const cam = o.cam;
-    // насколько камера смотрит вдоль ствола: в прицел вспышка видна «с торца»
-    const endOn = cam ? Math.abs(this._v.copy(cam.position).sub(pos).normalize().dot(dir)) : 0;
-    const axK = Math.sqrt(Math.max(0, 1 - endOn * endOn)) * 0.85 + 0.15;
-    const rnd = (a) => 1 - a + R2() * 2 * a;
-    for (const a of this.axial) a.hide();
-    let ai = 0;
-    const ax = (map, center, axis, len, w, col, op) => {
-      if (op > 1e-3 && ai < this.axial.length) this.axial[ai++].set(map, center, axis, len, w, col, op);
-    };
+  // kind: bare | fh | comp | linear | brake | supp; q — ориентация оружия (боковые струи),
+  // o.flash — заметность вспышки дульного устройства (0..1), o.first — первый выстрел из холодного глушителя
+  muzzleFlash(pos, dir, kind, size = 1, q = null, o = {}) {
+    const T2 = this.T, supp = kind === "supp";
+    const pick = (a3) => a3[R2() * a3.length | 0];
     this.flash.position.copy(pos);
+    if (q) this.flameAxis.quaternion.copy(q);
+    else this.flameAxis.quaternion.setFromUnitVectors(X_AXIS, dir);
     this.flash.visible = true;
-    this.flashAge = 0;
-    let lightI;
-    if (supp) {
-      // глушитель: вспышки нет; холодный глушитель даёт «первый хлопок» — кислород в камерах догорает
-      const frp = cold ? 1 : 0;
-      this.flashCore.visible = frp > 0;
-      this.flashCore.position.copy(dir).multiplyScalar(0.01);
-      this.flashCore.scale.setScalar(0.05 * k);
-      this.flashCore.material.color.setRGB(1, 0.55, 0.22);
-      this.flashCore.material.opacity = 0.55 * vis * frp;
-      this.flashStar.visible = false;
-      if (frp) ax(this.T.fire[0], pos.clone().addScaledVector(dir, 0.05 * k), dir, 0.1 * k, 0.05 * k, [1, 0.45, 0.16], 0.5 * vis * axK);
-      lightI = frp ? 1.2 * k : 0.05;
-    } else {
-      this.flashCore.visible = true;
-      this.flashCore.position.copy(dir).multiplyScalar(0.012 * k);
-      this.flashCore.scale.setScalar(0.045 * k * rnd(0.2));
-      this.flashCore.material.color.setRGB(1, 0.93, 0.78);
-      this.flashCore.material.opacity = Math.min(1, 0.9 * vis + 0.1);
-      this.flashStar.visible = P.star > 0;
-      this.flashStar.material.map = this.T.flash[R2() * 3 | 0];
-      this.flashStar.material.rotation = R2() * 6.28;
-      this.flashStar.position.copy(dir).multiplyScalar(0.03 * k);
-      this.flashStar.scale.setScalar((P.prongs ? 0.07 : 0.11) * k * rnd(0.25));
-      this.flashStar.material.opacity = P.star * vis * (0.06 + 0.94 * endOn * endOn);
-      const dl = 0.1 * k * rnd(0.2);
-      ax(this.T.disk, pos.clone().addScaledVector(dir, dl * 0.5), dir, dl, 0.034 * k, [1, 0.96, 0.86], P.disk * Math.min(1, vis * 1.3) * axK);
-      // вторичная вспышка начинается у диска Маха; днём глаз её почти не различает
-      const fl = 0.3 * k * rnd(0.3) * (0.5 + 0.5 * P.fire);
-      ax(this.T.fire[R2() * 2 | 0], pos.clone().addScaledVector(dir, 0.06 * k + fl * 0.45), dir, fl, 0.13 * k * rnd(0.25) * (0.6 + 0.4 * P.fire), vis < 0.5 ? [1, 0.45, 0.18] : [1, 0.56, 0.26], P.fire * Math.pow(vis, 1.6) * axK * 0.85);
-      if (P.prongs) {
-        // пламегаситель щелевой: короткие язычки из прорезей, ядро струи уже
-        for (let i = 0; i < 3; i++) {
-          const a = R2() * 6.28, rd = side.clone().multiplyScalar(Math.cos(a)).addScaledVector(vup, Math.sin(a)).multiplyScalar(0.35).add(dir).normalize();
-          ax(this.T.fire[1], pos.clone().addScaledVector(rd, 0.035 * k), rd, 0.06 * k, 0.018 * k, [1, 0.62, 0.3], 0.55 * vis);
-        }
-      }
-      if (P.jets) {
-        // ДТК: две мощные боковые струи; компенсатор — вверх
-        const dirs = P.up ? [vup.clone().multiplyScalar(0.9).addScaledVector(dir, 0.35).normalize()] : [side.clone().addScaledVector(dir, -0.15).normalize(), side.clone().negate().addScaledVector(dir, -0.15).normalize()];
-        for (const jd of dirs) {
-          const jl = 0.1 * k * rnd(0.25);
-          ax(this.T.disk, pos.clone().addScaledVector(dir, -0.012 * k).addScaledVector(jd, jl * 0.5), jd, jl, 0.03 * k, [1, 0.9, 0.7], 0.9 * P.jets * vis);
-          ax(this.T.fire[0], pos.clone().addScaledVector(jd, jl * 0.9), jd, jl * 1.3, 0.08 * k, [1, 0.5, 0.22], 0.5 * P.jets * Math.pow(vis, 1.6));
-        }
-      }
-      lightI = (4 + 6 * P.fire) * k;
-    }
-    this.flashLight.position.copy(pos).addScaledVector(dir, 0.12 * k);
-    this.flashLight.intensity = lightI;
-    this.light.uFlash.value.set(pos.x + dir.x * 0.1, pos.y + dir.y * 0.1, pos.z + dir.z * 0.1, supp ? 0.2 * (cold ? 3 : 0.2) : 6 * k * (0.4 + P.fire));
+    this.flashT = 0.03;
+    this.flashFade = 1;
+    const vis = o.flash ?? 1;
+    const k = size * (0.85 + R2() * 0.3);
+    const P = {
+      bare: { L: 0.3, W: 0.12, a: 1, long: true, star: 0 },
+      fh: { L: 0.11, W: 0.05, a: 0.55, long: false, star: 4 },
+      comp: { L: 0.16, W: 0.07, a: 0.85, long: false, star: 0 },
+      linear: { L: 0.22, W: 0.05, a: 0.8, long: true, star: 0 },
+      brake: { L: 0.1, W: 0.06, a: 0.75, long: false, star: 0 },
+      supp: { L: 0.035, W: 0.025, a: o.first ? 0.7 : 0.25, long: false, star: 0 }
+    }[kind] || { L: 0.2, W: 0.08, a: 0.9, long: true, star: 0 };
+    const a = P.a * (0.35 + 0.65 * Math.min(1, vis * 1.4));
+    const tex2 = P.long ? T2.flameLong : T2.flameShort;
+    const roll = R2() * Math.PI;
+    this.flamePlanes.forEach((m, i) => {
+      m.rotation.x = roll + i * Math.PI / 3;
+      m.material.map = pick(tex2);
+      m.userData.a = a * (i ? 0.75 : 1);
+      m.material.opacity = m.userData.a;
+      m.scale.set(P.L * k * (0.8 + R2() * 0.4), P.W * k * (0.8 + R2() * 0.4), 1);
+    });
+    this.flameStar.material.map = pick(P.star === 4 ? T2.star4 : P.star === 3 ? T2.star3 : T2.star);
+    this.flameStar.userData.a = a * (supp ? 0.5 : 0.9);
+    this.flameStar.material.opacity = this.flameStar.userData.a;
+    this.flameStar.position.set(P.L * 0.12 * k, 0, 0);
+    this.flameStar.rotation.x = R2() * 6.28;
+    this.flameStar.scale.setScalar(P.W * 1.5 * k * (0.8 + R2() * 0.4));
+    const jetDirs = kind === "brake" ? [[0, 0, 1], [0, 0, -1]] : kind === "comp" ? [[0.25, 1, 0.3], [0.25, 1, -0.3]] : [];
+    this.jets.forEach((g, i) => {
+      const d = jetDirs[i];
+      g.visible = !!d;
+      if (!d) return;
+      g.quaternion.setFromUnitVectors(X_AXIS, new THREE6.Vector3(...d).normalize());
+      g.position.set(P.L * 0.3 * k, 0, 0);
+      const L = (kind === "brake" ? 0.14 : 0.08) * k * (0.8 + R2() * 0.4);
+      g.children.forEach((m) => {
+        m.material.map = pick(T2.flameShort);
+        m.material.opacity = a * 0.8;
+        m.scale.set(L, L * 0.45, 1);
+      });
+    });
+    this.flashLight.position.copy(pos).addScaledVector(dir, 0.08);
+    this.flashLight.intensity = (supp ? 0.6 : 7) * a * size;
     this.heat = Math.min(3, this.heat + 0.22 * size);
-    // несгоревшие крупинки пороха: раскалённые, летят вперёд, вытягиваются по скорости
-    const nSp = Math.round((kind === "bare" ? 6 : 3) * P.sparks * size * (o.barrel ?? 1) * (0.6 + R2() * 0.8));
+    this.haze = Math.min(1, this.haze + 0.025 * size * (supp ? 0.8 : 1));
+    const nSp = supp ? 0 : Math.round((kind === "bare" ? 5 : kind === "brake" ? 4 : 2) * size * (0.5 + R2()));
     for (let i = 0; i < nSp; i++) {
-      const v = dir.clone().multiplyScalar(18 + R2() * 30).add(new THREE6.Vector3((R2() - 0.5) * 5, (R2() - 0.5) * 5, (R2() - 0.5) * 5));
-      this.fire.add({ pos: pos.clone().addScaledVector(dir, 0.02), vel: v, life: 0.03 + R2() * 0.07, size: 2.2e-3 + R2() * 2e-3, alpha: vis, color: [1, 0.66, 0.3], drag: 9, gravity: 3, stretch: 6, align: true, fadeIn: 0, spin: 0 });
+      const v = dir.clone().multiplyScalar(5 + R2() * 9).add(new THREE6.Vector3((R2() - 0.5) * 2, (R2() - 0.5) * 2, (R2() - 0.5) * 2));
+      this.fire.add({ pos: pos.clone().addScaledVector(dir, 0.03), vel: v, life: 0.04 + R2() * 0.07, size: 25e-4 + R2() * 3e-3, alpha: 1, color: [1, 0.66, 0.3], drag: 7, gravity: 3, stretch: 3, fadeIn: 0, spin: 0 });
     }
-    this.blastSmoke(pos, dir, side, vup, kind, size, o);
-  }
-  // Газы выстрела. Основная масса вылетает со скоростью в сотни м/с, но сразу тормозится воздухом:
-  // облако встаёт в 0,3…1,5 м перед стволом, быстро расширяется, светлеет и расползается ветром.
-  // Бездымный порох даёт немного дыма: полупрозрачный, серо-голубой, через 1…2 с его почти нет.
-  blastSmoke(pos, dir, side, vup, kind, size, o) {
-    const P = MUZZLE_FX[kind] || MUZZLE_FX.bare;
-    const dense = (o.smoke ?? 1) * P.smoke;
-    const supp = kind === "supp";
-    if (supp) {
-      // из глушителя газ выходит медленно — вялый клуб у торца, поднимается и тает
-      for (let i = 0; i < 3; i++) {
-        const v = dir.clone().multiplyScalar(0.8 + R2() * 1.6).add(new THREE6.Vector3((R2() - 0.5) * 0.15, 0.08 + R2() * 0.1, (R2() - 0.5) * 0.15));
-        this.smokePuff(pos.clone().addScaledVector(dir, 0.01), v, { size: 0.02, grow: 0.12 + R2() * 0.08, alpha: 0.2 * dense, life: 1.4 + R2(), drag: 2.4, buoy: 0.1, turb: 0.2, fadeIn: 0.05, grey: 0.74 });
-      }
-      return;
-    }
-    const n = Math.round(9 * Math.min(1.6, size) * (0.8 + 0.2 * dense));
+    const lvl = size * (supp ? 0.7 : kind === "brake" ? 0.8 : 1) * (o.smoke ?? 1);
+    const gas = size < 1 ? Math.pow(size, 1.5) : 1 + (size - 1) * 0.5;
+    const haze = (p, v, op) => this.smokePuff(p, v, { grey: 0.5 + R2() * 0.12, tint: 1, ...op, size: op.size * gas, grow: op.grow * gas });
+    const n = supp ? 5 : 8;
     for (let i = 0; i < n; i++) {
-      // путь до остановки ≈ v/drag: 0,2…1,2 м перед срезом
-      const sp = 3 + R2() * 10;
-      const v = dir.clone().multiplyScalar(sp).addScaledVector(side, (R2() - 0.5) * 1.6).addScaledVector(vup, (R2() - 0.4) * 1.2);
-      this.smokePuff(pos.clone().addScaledVector(dir, 0.02 + R2() * 0.04), v, { size: 0.025 + R2() * 0.02, grow: (0.22 + R2() * 0.26) * Math.min(1.5, size), growPow: 0.3, alpha: (0.22 + R2() * 0.14) * dense, life: 1.5 + R2() * 1.4, drag: 10 + R2() * 6, buoy: 0.07, turb: 0.3, fadeIn: 0.012, grey: 0.7 + R2() * 0.08 });
+      const v = dir.clone().multiplyScalar((supp ? 0.4 : 1.2) + R2() * (supp ? 0.8 : 2.4)).add(new THREE6.Vector3((R2() - 0.5) * 0.35, (R2() - 0.3) * 0.3, (R2() - 0.5) * 0.35));
+      haze(pos.clone().addScaledVector(dir, 0.02 + R2() * 0.12), v, { size: 0.02 + R2() * 0.02, grow: 0.22 + R2() * 0.28, alpha: (0.1 + R2() * 0.07) * lvl, life: 0.9 + R2() * 1.3, drag: 6 + R2() * 3, buoy: 0.06, turb: 0.5, fadeIn: 0.02 });
     }
-    // тороидальный вихрь у самого среза — маленький плотный клубок, крутится и медленно уходит вперёд
-    for (let i = 0; i < 2; i++) {
-      const v = dir.clone().multiplyScalar(1.2 + R2() * 1.4).addScaledVector(vup, 0.1);
-      this.smokePuff(pos.clone().addScaledVector(dir, 0.03), v, { size: 0.015, grow: 0.1 * Math.min(1.5, size), alpha: 0.16 * dense, life: 0.7 + R2() * 0.5, drag: 3, buoy: 0.08, turb: 0.2, fadeIn: 0.01, grey: 0.7 });
-    }
-    if (P.jets) {
-      const dirs = P.up ? [vup] : [side, side.clone().negate()];
-      for (const jd of dirs) for (let i = 0; i < 4; i++) {
-        const v = jd.clone().multiplyScalar(5 + R2() * 7).addScaledVector(dir, -0.5 + R2() * 1.5).addScaledVector(vup, (R2() - 0.3) * 1.2);
-        this.smokePuff(pos.clone(), v, { size: 0.02, grow: 0.22 + R2() * 0.18, growPow: 0.35, alpha: 0.16 * dense, life: 1 + R2() * 0.8, drag: 8, buoy: 0.05, turb: 0.3, fadeIn: 0.015 });
+    const side = new THREE6.Vector3(0, 0, 1).applyQuaternion(this.flameAxis.quaternion);
+    const up = new THREE6.Vector3(0, 1, 0);
+    if (kind === "brake" || kind === "comp") {
+      for (let i = 0; i < 6; i++) {
+        const sg = kind === "comp" ? (R2() - 0.5) * 0.6 : i % 2 ? 1 : -1;
+        const v = side.clone().multiplyScalar(sg * (1.5 + R2() * 2)).addScaledVector(up, kind === "comp" ? 1.2 + R2() * 1.5 : (R2() - 0.2) * 0.6).addScaledVector(dir, R2() * 0.6);
+        haze(pos.clone(), v, { size: 0.02, grow: 0.25 + R2() * 0.2, alpha: 0.09 * size, life: 0.9 + R2() * 0.8, drag: 7, turb: 0.5 });
       }
     }
+    for (let i = 0; i < 2; i++) {
+      haze(pos.clone().addScaledVector(dir, 0.05 + R2() * 0.2), dir.clone().multiplyScalar(0.15 + R2() * 0.3).add(new THREE6.Vector3(0, 0.04, 0)), { size: 0.05, grow: 0.5 + R2() * 0.3, alpha: 0.045 * lvl, life: 2.2 + R2() * 1.5, drag: 2.5, buoy: 0.07, turb: 0.35, fadeIn: 0.2 });
+    }
   }
-  // пороховые газы из окна выброса (у глушителя их заметно больше — газ идёт назад)
+  // пороховые газы из окна выброса
   portSmoke(pos, dir, k = 1) {
     for (let i = 0; i < 2; i++) {
-      const v = dir.clone().multiplyScalar(0.35 + R2() * 0.3).add(new THREE6.Vector3((R2() - 0.5) * 0.1, 0.12 + R2() * 0.08, 0));
-      this.smokePuff(pos.clone(), v, { size: 0.01, grow: 0.08 + R2() * 0.06, alpha: 0.1 * k, life: 0.7 + R2() * 0.5, drag: 3, grey: 0.72 });
+      const v = dir.clone().multiplyScalar(0.35 + R2() * 0.3).add(new THREE6.Vector3((R2() - 0.5) * 0.1, 0.18 + R2() * 0.1, 0));
+      this.smokePuff(pos.clone(), v, { size: 0.01, grow: 0.1 + R2() * 0.08, alpha: Math.min(0.2, 0.09 * k), life: 0.8 + R2() * 0.6, drag: 3.5, grey: 0.6, tint: 1, turb: 0.3 });
     }
   }
   shellMesh(key, cal, live) {
@@ -941,91 +949,145 @@ var FX = class {
     s.t = 0;
     s.bounced = 0;
     s.steel = c.steel;
-    s.kind = c.shot ? "hull" : c.steel ? "steel" : "brass";
     s.live = live;
+    s.prevY = pos.y;
     s.r = c.rim * 5e-4;
+    s.kind = c.shot ? "hull" : c.steel ? "steel" : "brass";
     s.trail = live ? 0 : c.shot ? 0.5 : 0.28;
     return s;
   }
-  // Попадание: пыль и комья по земле/валу, искры и отметина на стали.
-  impact(hit, surface) {
+  // Попадание. Сталь — искры и отметина; бумага — пробоина и клочки картона;
+  // бетон — серая пыль и крошка; дерево — щепа; пулеулавливатель — искры и тёмная пыль.
+  // o: { v — скорость у цели, м/с; graze — рикошет под скользящим углом; pellet — картечина; dir — направление полёта }
+  impact(hit, surface, o = {}) {
     const p = hit.point, n = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE6.Vector3(0, 1, 0);
-    if (surface === "steel") {
-      for (let i = 0; i < 3; i++) this.smokePuff(p.clone().addScaledVector(n, 0.02), n.clone().multiplyScalar(0.4).add(new THREE6.Vector3((R2() - 0.5) * 0.6, R2() * 0.5, (R2() - 0.5) * 0.6)), { life: 0.7, size: 0.06, grow: 0.25, alpha: 0.4, drag: 3 });
-      for (let i = 0; i < 10; i++) {
-        const v = n.clone().multiplyScalar(1 + R2() * 2).add(new THREE6.Vector3((R2() - 0.5) * 4, R2() * 3, (R2() - 0.5) * 4));
-        this.fire.add({ pos: p.clone().addScaledVector(n, 0.01), vel: v, life: 0.15 + R2() * 0.25, size: 0.012 + R2() * 0.01, alpha: 1, color: [1, 0.75, 0.4], drag: 1.5, gravity: 9.8, stretch: 2, fadeIn: 0, spin: 0 });
+    // энергия удара относительно винтовочной пули 5,56 у дульного среза
+    const E = o.v ? Math.max(0.25, Math.min(2.2, Math.pow(o.v / 800, 2) * (o.mass ?? 4) / 4)) : 1;
+    const q = o.pellet ? 0.35 : Math.sqrt(E);
+    if (o.graze) {
+      // рикошет: веер искр/пыли вдоль отражённого направления, отметины нет
+      const d = o.dir ? o.dir.clone() : n.clone().negate();
+      const refl = d.sub(n.clone().multiplyScalar(2 * d.dot(n))).normalize();
+      const hard = surface === "steel" || surface === "trap" || surface === "panel" || surface === "concrete";
+      for (let i = 0; i < (hard ? 6 : 3); i++) {
+        const v = refl.clone().multiplyScalar(4 + R2() * 6).add(new THREE6.Vector3((R2() - 0.5) * 1.5, R2() * 1.2, (R2() - 0.5) * 1.5));
+        if (hard) this.fire.add({ pos: p.clone().addScaledVector(n, 0.01), vel: v, life: 0.08 + R2() * 0.12, size: 0.01 + R2() * 0.008, alpha: 1, color: [1, 0.72, 0.38], drag: 2, gravity: 9.8, stretch: 3, fadeIn: 0, spin: 0 });
+        this.smoke.add({ pos: p.clone(), vel: v.multiplyScalar(0.15), life: 0.6 + R2() * 0.4, size: 0.03, grow: 0.25, alpha: 0.25, color: [0.6, 0.58, 0.55], drag: 3, gravity: 0.3, turb: 0.3 });
       }
-      const hole = new THREE6.Mesh(this.holeGeo, this.holeMat);
-      hit.object.worldToLocal(hole.position.copy(p).addScaledVector(n, 15e-4));
+      return;
+    }
+    const sparks = (cnt, spd, col = [1, 0.75, 0.4]) => {
+      cnt = Math.max(1, Math.round(cnt * q));
+      for (let i = 0; i < cnt; i++) {
+        const v = n.clone().multiplyScalar(1 + R2() * spd).add(new THREE6.Vector3((R2() - 0.5) * 4, R2() * 3, (R2() - 0.5) * 4));
+        this.fire.add({ pos: p.clone().addScaledVector(n, 0.01), vel: v.multiplyScalar(0.7 + 0.3 * q), life: 0.15 + R2() * 0.25, size: 0.012 + R2() * 0.01, alpha: 1, color: col, drag: 1.5, gravity: 9.8, stretch: 2, fadeIn: 0, spin: 0 });
+      }
+    };
+    const dust = (cnt, col, size = 0.08, alpha = 0.55) => {
+      cnt = Math.max(1, Math.round(cnt * q));
+      size *= 0.7 + 0.3 * q;
+      for (let i = 0; i < cnt; i++) {
+        this.smoke.add({ pos: p.clone(), vel: n.clone().multiplyScalar(0.8 + R2() * 1.4).add(new THREE6.Vector3((R2() - 0.5) * 0.9, R2() * 1.2, (R2() - 0.5) * 0.9)), life: 1 + R2() * 0.8, size, grow: size * 7, alpha, color: col, drag: 2.5, gravity: 0.4, turb: 0.3 });
+      }
+    };
+    const chips = (cnt, col, size = 0.025) => {
+      cnt = Math.max(1, Math.round(cnt * q));
+      for (let i = 0; i < cnt; i++) {
+        this.smoke.add({ pos: p.clone(), vel: n.clone().multiplyScalar(2 + R2() * 2).add(new THREE6.Vector3((R2() - 0.5) * 2, R2() * 2, (R2() - 0.5) * 2)), life: 0.5 + R2() * 0.3, size, alpha: 0.9, color: col, drag: 0.8, gravity: 9.8, fadeIn: 0 });
+      }
+    };
+    const hole = (scale = 1) => {
+      const m = new THREE6.Mesh(this.holeGeo, this.holeMat);
+      hit.object.worldToLocal(m.position.copy(p).addScaledVector(n, 15e-4));
       const ln = n.clone().transformDirection(new THREE6.Matrix4().copy(hit.object.matrixWorld).invert());
-      hole.lookAt(hole.position.clone().add(ln));
-      hit.object.add(hole);
-      this.holes.push(hole);
-      if (this.holes.length > 80) {
+      m.lookAt(m.position.clone().add(ln));
+      m.scale.setScalar(scale * (o.hole ?? 1));
+      hit.object.add(m);
+      this.holes.push(m);
+      if (this.holes.length > 120) {
         const h = this.holes.shift();
         h.parent?.remove(h);
       }
+    };
+    if (surface === "steel") {
+      for (let i = 0; i < 3; i++) this.smokePuff(p.clone().addScaledVector(n, 0.02), n.clone().multiplyScalar(0.4).add(new THREE6.Vector3((R2() - 0.5) * 0.6, R2() * 0.5, (R2() - 0.5) * 0.6)), { life: 0.7, size: 0.06, grow: 0.25, alpha: 0.4, drag: 3 });
+      sparks(10, 2);
+      hole();
+    } else if (surface === "paper") {
+      hole(0.55);
+      chips(4, [0.72, 0.6, 0.42], 0.012);
+    } else if (surface === "trap") {
+      sparks(6, 1.5, [1, 0.7, 0.35]);
+      dust(3, [0.3, 0.29, 0.27], 0.1, 0.4);
+    } else if (surface === "wood") {
+      dust(3, [0.55, 0.45, 0.33], 0.05, 0.45);
+      chips(6, [0.6, 0.48, 0.32], 0.02);
+    } else if (surface === "panel") {
+      sparks(2, 1);
+      dust(3, [0.35, 0.35, 0.36], 0.06, 0.4);
     } else {
-      for (let i = 0; i < 6; i++) {
-        this.smoke.add({ pos: p.clone(), vel: n.clone().multiplyScalar(0.8 + R2() * 1.4).add(new THREE6.Vector3((R2() - 0.5) * 0.9, R2() * 1.2, (R2() - 0.5) * 0.9)), life: 1 + R2() * 0.8, size: 0.08, grow: 0.55, alpha: 0.55, color: [0.58, 0.5, 0.39], drag: 2.5, gravity: 0.4, turb: 0.3 });
-      }
-      for (let i = 0; i < 5; i++) {
-        this.smoke.add({ pos: p.clone(), vel: n.clone().multiplyScalar(2 + R2() * 2).add(new THREE6.Vector3((R2() - 0.5) * 2, R2() * 2, (R2() - 0.5) * 2)), life: 0.5 + R2() * 0.3, size: 0.025, alpha: 0.9, color: [0.3, 0.26, 0.2], drag: 0.8, gravity: 9.8, fadeIn: 0 });
-      }
+      dust(6, [0.62, 0.61, 0.58]);
+      chips(5, [0.45, 0.44, 0.42]);
     }
   }
-  // i — номер излучателя (0/1): два ЛЦУ на одном оружии светят независимо
-  setLaser(on, pos, dir, hitables, color = 16722458, i = 0) {
+  // ЛЦУ. s: { pos, dir, hitables, color, k — мощность 0..1 (батарея), night }; i — номер излучателя.
+  // Луч в чистом воздухе почти не виден; в темноте и в дыму — тонкая нить.
+  setLaser(s, i = 0) {
     const L = this.lasers[i];
-    if (!L) return;
-    L.beam.visible = L.dot.visible = !!on;
+    const on = !!s && s.k > 2e-3;
+    L.beam.visible = L.dot.visible = L.halo.visible = on;
     if (!on) return;
-    if (L.color !== color) {
-      L.color = color;
-      L.beam.material.color.setHex(color);
-      L.dot.material.color.setHex(color);
-    }
+    const { pos, dir } = s;
     this.ray.set(pos, dir);
     this.ray.far = 250;
-    const h = this.ray.intersectObjects(hitables, false)[0];
+    const h = this.ray.intersectObjects(s.hitables, false)[0];
     const d = h ? h.distance : 250;
+    const col = s.color ?? 16722458;
+    L.beam.material.color.set(col);
+    L.dot.material.color.set(col);
+    L.halo.material.color.set(col);
     L.beam.position.copy(pos);
     L.beam.scale.set(d, 1, 1);
     L.beam.quaternion.setFromUnitVectors(X_AXIS, dir);
+    L.beam.material.opacity = s.k * ((s.night ? 0.045 : 6e-3) + this.haze * (s.night ? 0.4 : 0.12));
     L.dot.position.copy(pos).addScaledVector(dir, d - 0.01);
-    L.dot.scale.setScalar((0.015 + d * 22e-4) * L.k);
+    L.halo.position.copy(L.dot.position);
+    const ds = 7e-3 + d * 9e-4;
+    L.dot.scale.setScalar(ds);
+    L.dot.material.opacity = Math.min(1, s.k * 1.1);
+    L.halo.scale.setScalar(ds * (s.night ? 5 : 2.2));
+    L.halo.material.opacity = s.k * (s.night ? 0.4 : 0.12);
   }
-  // spec: {cd, spill, hot, kelvin, lens}; level — отдача с учётом батареи (0…1); haze — видимость луча
-  setLight(on, pos, dir, spec, level = 1, haze = 1, cam, i = 0) {
-    const T2 = this.torches[i];
-    if (!T2) return;
-    const lit = !!on && level > 0;
-    T2.set(lit, pos, dir, spec, level, haze, cam);
-    // луч фонаря подсвечивает дым: частицы в конусе рассеивают свет
-    const P = this.light.uTorchP.value[i], D = this.light.uTorchD.value[i];
-    if (lit) {
-      P.set(pos.x, pos.y, pos.z, spec.cd * 22e-4 * 0.0016 * level);
-      D.set(dir.x, dir.y, dir.z, Math.cos(spec.angle ?? 0.62));
-      this.light.uTorchC.value[i].copy(T2.spot.color);
-    } else P.w = 0;
+  // Фонарь i (0 — основной, подсвечивает дым и пылинки; 1 — второй).
+  setLight(s, i = 0) {
+    this.rigs[i].set(s, this.haze);
+    this.beamOn = this.rigs[0].on || this.rigs[1].on;
+    this.motes.visible = this.rigs[0].on;
   }
-  setLaserLevel(level, haze, i = 0) {
-    const L = this.lasers[i];
-    if (!L) return;
-    const k = Math.max(0, level);
-    L.beam.material.opacity = (0.05 + 0.3 * haze) * k;
-    L.dot.material.opacity = Math.min(1, 0.25 + k);
-    L.k = 0.6 + 0.8 * haze;
+  // Качество: шаги объёмного луча, число пылинок, размер тени второго фонаря.
+  setQuality(q) {
+    for (const r of this.rigs) {
+      const m = r.cone.material;
+      if (m.defines.STEPS !== q.steps) {
+        m.defines.STEPS = q.steps;
+        m.needsUpdate = true;
+      }
+    }
+    this.motes.geometry.setDrawRange(0, q.motes);
+    const sp = this.rigs[0].spot.shadow;
+    if (sp.mapSize.x !== q.spot) {
+      sp.mapSize.set(q.spot, q.spot);
+      sp.map?.dispose();
+      sp.map = null;
+    }
   }
-  // Трассы пуль в полёте: трассер — яркая полоса с горячей головой (зажигается метрах в 10 от среза),
-  // обычная пуля — едва заметный «след» (возмущение воздуха ударной волной), виден в основном сзади.
+  // Трасса пули: след ударной волны/тёплого воздуха за пулей или трассер (гореть начинает с 10 м).
   bullets(list, mode, cam) {
     this.tracers.begin(cam);
     this.traces.begin(cam);
     if (mode !== "off") {
-      const vis = FLASH_VIS[this.timeOfDay] ?? 1;
-      const amb = SMOKE_AMB[this.timeOfDay] || SMOKE_AMB.day;
+      const vis = this.night ? 1 : 0.45;
+      const amb = this.night ? [0.035, 0.042, 0.06] : [0.92, 0.94, 0.98];
       const A = this._v, dirV = this._v2;
       for (const b of list) {
         const head = b.p, fade = b.alive ? 1 : Math.max(0, (b.fade ?? 0) / 0.12);
@@ -1053,37 +1115,40 @@ var FX = class {
     this.tracers.end();
     this.traces.end();
   }
+  setAmbient(k) {
+    LIT.uAmb.value.setScalar(k);
+  }
   // muzzle — текущий дульный срез: от нагретого ствола после очереди идёт струйка дыма
   update(dt, onShellBounce, cam, muzzle) {
-    this.clock += dt;
-    if (this.flashAge < 3) {
-      this.flashAge++;
-      if (this.flashAge === 2) {
-        // второй кадр: ядро погасло, догорает только факел
-        this.flashCore.visible = this.flashStar.visible = false;
-        for (const a of this.axial) a.u.opacity.value = a.base * 0.3;
-        this.flashLight.intensity *= 0.25;
-        this.light.uFlash.value.w *= 0.3;
-      } else if (this.flashAge >= 3) {
+    this.time += dt;
+    this.haze *= Math.exp(-dt / 30);
+    for (const r of this.rigs) r.cone.material.uniforms.uTime.value = this.time;
+    this.motes.material.uniforms.uTime.value = this.time;
+    LIT.uFlashPos.value.copy(this.flashLight.position);
+    LIT.uFlashCol.value.setRGB(1, 0.66, 0.31).multiplyScalar(this.flashLight.intensity / 2.2);
+    if (this.flashT > 0) {
+      this.flashT -= dt;
+      if (this.flashT <= 0) {
         this.flash.visible = false;
-        for (const a of this.axial) a.hide();
         this.flashLight.intensity = 0;
-        this.light.uFlash.value.w = 0;
+      } else {
+        this.flashLight.intensity *= 0.5;
+        this.flashFade *= 0.55;
       }
     }
-    // освещённость дыма по времени суток; ночью — плюс дежурный натриевый фонарь у рубежа
-    const amb = SMOKE_AMB[this.timeOfDay] || SMOKE_AMB.day;
-    this.light.uAmb.value.setRGB(amb[0], amb[1], amb[2]);
-    if (this.lamp) {
-      const lp = this.lamp.position;
-      this.light.uLamp.value.set(lp.x, lp.y, lp.z, this.lamp.intensity * 0.012);
+    if (this.flash.visible && cam) {
+      const ax = this._v.set(1, 0, 0).applyQuaternion(this.flameAxis.quaternion);
+      const f = Math.abs(ax.dot(this._v2.subVectors(this.flash.position, cam.position).normalize()));
+      const F = this.flashFade;
+      this.flameStar.material.opacity = this.flameStar.userData.a * (0.15 + 0.85 * f * f) * F;
+      for (const m of this.flamePlanes) m.material.opacity = m.userData.a * (1 - 0.55 * f * f) * F;
     }
     if (this.heat > 0) {
       this.heat = Math.max(0, this.heat - dt * 0.35);
       this.wispT -= dt;
       if (this.wispT <= 0 && this.heat > 0.3 && muzzle) {
-        this.wispT = 0.07 + R2() * 0.06;
-        this.smokePuff(muzzle.clone(), new THREE6.Vector3((R2() - 0.5) * 0.02, 0.1 + R2() * 0.06, (R2() - 0.5) * 0.02), { size: 0.008, grow: 0.07, alpha: Math.min(0.1, this.heat * 0.04), life: 1.6 + R2(), drag: 1.2, buoy: 0.08, turb: 0.1, grey: 0.74, fadeIn: 0.3 });
+        this.wispT = 0.06 + R2() * 0.05;
+        this.smokePuff(muzzle.clone(), new THREE6.Vector3((R2() - 0.5) * 0.02, 0.1 + R2() * 0.06, (R2() - 0.5) * 0.02), { size: 0.01, grow: 0.09, alpha: Math.min(0.08, this.heat * 0.035), life: 1.8 + R2(), drag: 1.2, buoy: 0.06, turb: 0.12, grey: 0.6, tint: 1, fadeIn: 0.3 });
       }
     }
     for (const s of this.shells) {
@@ -1104,9 +1169,12 @@ var FX = class {
       }
       if (s.trail > 0) {
         s.trail -= dt;
-        if (R2() < 0.45) this.smokePuff(s.pos.clone(), s.vel.clone().multiplyScalar(0.1), { size: 6e-3, grow: 0.05, alpha: 0.14, life: 0.5 + R2() * 0.4, drag: 4, grey: 0.74, fadeIn: 0.02 });
+        if (R2() < 0.45) this.smokePuff(s.pos.clone(), s.vel.clone().multiplyScalar(0.1), { size: 6e-3, grow: 0.05, alpha: 0.06, life: 0.5 + R2() * 0.4, drag: 4, grey: 0.62, tint: 1, fadeIn: 0.02 });
       }
-      const floor = (Math.abs(s.pos.x + 0.8) < 3 && Math.abs(s.pos.z) < 2.5 ? 0.12 : 0) + s.r;
+      let fl = this.floorAt(s.pos.x, s.pos.z);
+      if (fl > 0 && s.prevY < fl) fl = 0;
+      s.prevY = s.pos.y;
+      const floor = fl + s.r;
       if (s.pos.y < floor) {
         s.pos.y = floor;
         if (s.vel.y < -0.35) {
@@ -1136,9 +1204,7 @@ var FX = class {
       if (n || m.count) m.instanceMatrix.needsUpdate = true;
       m.count = n;
     }
-    this.smoke.update(dt, cam, this.smokeWind);
+    this.smoke.update(dt, cam, this.wind);
     this.fire.update(dt, cam, this.noWind);
   }
 };
-
-

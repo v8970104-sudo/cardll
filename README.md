@@ -12,6 +12,7 @@
 | `dist/mp5a3.html` | HK MP5A3, 9×19 |
 | `dist/glock18c.html` | Glock 18C, 9×19 |
 | `dist/remington870.html` | Remington 870, 12 калибр (картечь, дробь, пуля) |
+| `dist/angar_map.html` | карта ANGAR-07 (ангар, ALPHA vs DELTA) — сборка `node angar/build.mjs`, см. [angar/README.md](angar/README.md) |
 
 ## Сборка
 

@@ -2224,7 +2224,7 @@ function detailNormalTex(size) {
 var SURF_U = { uDetailN: { value: null }, uStains: { value: 1 } };
 function addSurfaceDetail(mat, opts) {
   const prev = mat.onBeforeCompile;
-  const stains = !!opts.stains, k = opts.detail ?? 0.35;
+  const stains = !!opts.stains, slabs = !!opts.slabs, k = opts.detail ?? 0.35;
   mat.onBeforeCompile = (sh, r) => {
     if (prev) prev(sh, r);
     sh.uniforms.uDetailN = SURF_U.uDetailN;
@@ -2245,6 +2245,23 @@ function addSurfaceDetail(mat, opts) {
           // следы шин вдоль проездов (по оси x у баз и по z в пролётах)
           float lane = smoothstep(0.55, 0.9, sdN(vec2(sdW.z*3.2, sdW.x*0.05))) * (1.0 - smoothstep(10.0, 13.0, abs(sdW.z))) * step(18.0, abs(sdW.x));
           diffuseColor.rgb *= 1.0 - oil*0.55 - wet*0.28 - lane*0.12;
+          ${slabs ? `
+          // плиты 6×6 м: у каждой свой тон и свой блеск затирки
+          vec2 sq = (sdW.xz + vec2(40.0, 30.0))/6.0, slab = floor(sq), lp = fract(sq)*6.0;
+          float sh = sdH(slab + 0.37);
+          diffuseColor.rgb *= 0.92 + 0.16*sh;
+          // дуги от затирочного диска: матовые и шлифованные полосы
+          vec2 cc = floor(lp/1.5)*1.5 + 0.75;
+          float swirl = sin(length(lp - cc)*10.0 + sdN(lp*0.9 + slab*3.1)*5.0)*0.5 + 0.5;
+          roughnessFactor = clamp(roughnessFactor - 0.08 - 0.2*swirl*(0.4 + 0.6*sh), 0.05, 1.0);
+          // заполнитель: мелкие светлые и тёмные зёрна вблизи
+          float ag = sdH(floor(sdW.xz*120.0)), agk = 1.0 - smoothstep(2.5, 8.0, length(vViewPosition));
+          diffuseColor.rgb *= 1.0 + (step(0.94, ag)*0.16 - step(ag, 0.05)*0.14)*agk;
+          // грязь, забитая в швы, и сколы кромок
+          vec2 dj = min(lp, 6.0 - lp);
+          float grime = 1.0 - smoothstep(0.0, 0.16 + 0.14*sdN(sdW.xz*7.0), min(dj.x, dj.y));
+          diffuseColor.rgb *= 1.0 - grime*0.3;
+          roughnessFactor = mix(roughnessFactor, 0.95, grime);` : ""}
           roughnessFactor = mix(roughnessFactor, 0.35, oil*0.8);
           roughnessFactor = mix(roughnessFactor, 0.12, wet);
         }` : ""}`).replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>
@@ -2259,7 +2276,7 @@ function addSurfaceDetail(mat, opts) {
         }`);
   };
   const key = mat.customProgramCacheKey ? mat.customProgramCacheKey() : "";
-  mat.customProgramCacheKey = () => key + "|sd" + (stains ? 1 : 0) + k;
+  mat.customProgramCacheKey = () => key + "|sd" + (stains ? 1 : 0) + (slabs ? 1 : 0) + k;
   return mat;
 }
 async function prewarmShaders() {
@@ -3345,7 +3362,9 @@ function buildFloor() {
     }
     tiles.push(g);
   }
-  const floor = new THREE.Mesh(BGU.mergeGeometries(tiles, false), M.conc);
+  // у пола свой материал: плиты, затирка и швы не должны попадать на блоки и отбойники
+  M.floor = M.floor || M.conc.clone();
+  const floor = new THREE.Mesh(BGU.mergeGeometries(tiles, false), M.floor);
   floor.receiveShadow = true;
   floor.name = "floor";
   scene.add(floor);
@@ -5100,10 +5119,18 @@ function updateWaves(dt) {
 // с тенями от ферм и укрытий), конусы прожекторов и ореолы точечных источников (лампы, огонь).
 // Считается в пониженном разрешении, размывается с учётом глубины и добавляется к кадру.
 var VOL_ON = Q.vol > 0;
+// объёмный свет может отключить адаптивное качество — тогда возвращаются дешёвые конусы
+function setVolumetric(on) {
+  const P = volPass;
+  if (!P) return;
+  P.enabled = on;
+  VOL_ON = on;
+  applyDaylight(DAY_T);
+}
 var VOL_SPOTS = 6;
 var VOL_POINTS = 8;
 // множители подобраны на глаз: прожекторы и лампы в кд намного слабее солнца
-var VOL = { density: 8e-3, sun: 1, spots: 5, points: 0.2, maxDist: 55 };
+var VOL = { density: 9e-3, sun: 1, spots: 6, points: 0.22, maxDist: 55 };
 function volNoiseTex(S = 32) {
   const d = new Uint8Array(S * S * S);
   for (let i = 0; i < d.length; i++) d[i] = Math.floor(rnd2() * 256);
@@ -5181,7 +5208,7 @@ var VolumetricPass = class extends import_Pass.Pass {
         const float PI4 = 12.566371;
         float hg(float c, float g){ float g2 = g*g; return (1.0 - g2)/(PI4*pow(max(1.0 + g2 - 2.0*g*c, 1e-3), 1.5)); }
         // пыль в воздухе: крупные частицы рассеивают вперёд, поэтому луч ярче, когда смотришь к источнику
-        float phase(float c){ return 0.55*hg(c, 0.62) + 0.45/PI4; }
+        float phase(float c){ return 0.72*hg(c, 0.66) + 0.28/PI4; }
         float density(vec3 p){
           vec3 w = vec3(uTime*0.05, uTime*0.012, uTime*0.03);
           float n = texture(tNoise, p*0.045 + w).r*0.6 + texture(tNoise, p*0.13 - w*1.7).r*0.4;
@@ -5288,7 +5315,13 @@ var VolumetricPass = class extends import_Pass.Pass {
     this.quad = new import_Pass.FullScreenQuad(this.march);
     this._spots = [];
   }
+  setScale(k) {
+    this.scale = k;
+    if (this._w) this.setSize(this._w, this._h);
+  }
   setSize(w, h) {
+    this._w = w;
+    this._h = h;
     const W = Math.max(1, Math.round(w * this.scale)), H = Math.max(1, Math.round(h * this.scale));
     this.rtA.setSize(W, H);
     this.rtB.setSize(W, H);
@@ -5435,6 +5468,19 @@ function buildComposer() {
     aoPass.restoreVisibility = function() {
       camera.layers.mask = this._mask;
       if (dust) dust.visible = this._dust;
+    };
+    // Оптимизация: AO берёт глубину основного прохода и восстанавливает нормали по ней, вместо
+    // того чтобы рисовать всю сцену второй раз ради G-буфера (−половина draw calls и треугольников).
+    // Буферы композера чередуются между кадрами, поэтому источник глубины сверяется каждый кадр.
+    const aoRender = aoPass.render.bind(aoPass);
+    aoPass.render = (r, wb, rb, dt, mask) => {
+      const d = scenePass.target && scenePass.target.depthTexture;
+      if (d && aoPass.depthTexture !== d) {
+        const first = aoPass._renderGBuffer;
+        aoPass.setGBuffer(d);
+        if (first) aoPass.gtaoMaterial.needsUpdate = aoPass.pdMaterial.needsUpdate = true;
+      }
+      aoRender(r, wb, rb, dt, mask);
     };
     composer.addPass(aoPass);
   }
@@ -8719,6 +8765,103 @@ function meshAt(geo, mat, x, y, z, opt = {}) {
   return m;
 }
 var barrelGeoCache = {};
+// Стальная бочка 200 л: закатанные кромки, два ребра жёсткости, утопленная крышка с пробками.
+// Центр по высоте — в нуле; одна геометрия на все бочки (запекается в общие буферы).
+var _drumGeo = null;
+function drumGeo() {
+  if (_drumGeo) return _drumGeo;
+  const P = [[0, -0.438], [0.268, -0.438], [0.283, -0.44], [0.296, -0.432], [0.294, -0.414], [0.286, -0.404], [0.287, -0.24], [0.298, -0.226], [0.298, -0.214], [0.287, -0.2], [0.287, 0.2], [0.298, 0.214], [0.298, 0.226], [0.287, 0.24], [0.286, 0.404], [0.294, 0.414], [0.296, 0.432], [0.283, 0.44], [0.268, 0.438], [0.262, 0.424], [0, 0.424]];
+  const body = new THREE.LatheGeometry(P.map(([r, y]) => new THREE.Vector2(r, y)), 28);
+  const parts = [body.toNonIndexed()];
+  for (const [bx, bz, r] of [[0.17, 0, 0.036], [-0.18, 0.06, 0.022]]) {
+    const b = new THREE.CylinderGeometry(r, r * 1.08, 0.022, 10);
+    b.translate(bx, 0.433, bz);
+    parts.push(b.toNonIndexed());
+  }
+  for (const g of parts) g.deleteAttribute("uv");
+  _drumGeo = BGU.mergeGeometries(parts.map((g) => {
+    const a = g.attributes.position, uv = new Float32Array(a.count * 2);
+    // цилиндрическая развёртка: u — по окружности, v — по высоте (кромки у v≈0 и v≈1)
+    for (let i = 0; i < a.count; i++) {
+      uv[i * 2] = Math.atan2(a.getZ(i), a.getX(i)) / (Math.PI * 2) + 0.5;
+      uv[i * 2 + 1] = clamp(a.getY(i) / 0.88 + 0.5, 0, 1);
+    }
+    g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+    return g;
+  }), false);
+  _drumGeo.computeVertexNormals();
+  return _drumGeo;
+}
+var DRUM_MAPS = null;
+function drumMaps(W, H) {
+  const [c, x] = cv(W, H), [rc, rx] = cv(W, H);
+  x.fillStyle = "#c4c4c4";
+  x.fillRect(0, 0, W, H);
+  rx.fillStyle = "#8a8a8a";
+  rx.fillRect(0, 0, W, H);
+  // ржавчина по кромкам и у рёбер — там краска сбита ударами
+  for (const [y0, y1] of [[0, H * 0.07], [H * 0.93, H], [H * 0.24, H * 0.27], [H * 0.73, H * 0.76]]) {
+    for (let i = 0; i < 70; i++) {
+      const px = srnd() * W, py = sr(y0, y1), r = sr(1.5, 7);
+      wrapDraw(x, W, () => {
+        x.fillStyle = `rgba(${si(95, 130)},${si(45, 62)},${si(20, 32)},${sr(0.3, 0.75)})`;
+        x.beginPath();
+        x.arc(px, py, r, 0, 7);
+        x.fill();
+      });
+      rx.fillStyle = "rgba(240,240,240,0.7)";
+      rx.beginPath();
+      rx.arc(px, py, r, 0, 7);
+      rx.fill();
+    }
+  }
+  // потёки топлива и ржавчины от горловины вниз
+  for (let i = 0; i < 26; i++) {
+    const px = srnd() * W, L = sr(H * 0.1, H * 0.6), w = sr(1, 4);
+    const g = x.createLinearGradient(0, 0, 0, L);
+    const oil = srnd() < 0.5;
+    g.addColorStop(0, oil ? "rgba(30,26,20,0.55)" : "rgba(110,55,25,0.5)");
+    g.addColorStop(1, "rgba(40,30,20,0)");
+    x.fillStyle = g;
+    x.fillRect(px, 0, w, L);
+    if (oil) {
+      rx.fillStyle = "rgba(60,60,60,0.5)";
+      rx.fillRect(px, 0, w, L * 0.8);
+    }
+  }
+  for (let i = 0; i < 90; i++) {
+    const px = srnd() * W, py = srnd() * H, L = sr(4, 22), a = sr(0, 6.28);
+    x.strokeStyle = `rgba(${si(60, 85)},${si(55, 70)},${si(50, 62)},${sr(0.3, 0.6)})`;
+    x.lineWidth = sr(0.5, 1.4);
+    x.beginPath();
+    x.moveTo(px, py);
+    x.lineTo(px + Math.cos(a) * L, py + Math.sin(a) * L);
+    x.stroke();
+  }
+  // этикетка с ромбом опасного груза
+  x.fillStyle = "rgba(230,226,214,0.92)";
+  x.fillRect(W * 0.06, H * 0.36, W * 0.16, H * 0.26);
+  x.fillStyle = "#c84a1c";
+  x.save();
+  x.translate(W * 0.14, H * 0.45);
+  x.rotate(Math.PI / 4);
+  x.fillRect(-W * 0.035, -W * 0.035, W * 0.07, W * 0.07);
+  x.restore();
+  x.fillStyle = "#222";
+  for (let k = 0; k < 4; k++) x.fillRect(W * 0.08, H * (0.52 + k * 0.022), W * 0.12 * (k % 2 ? 0.7 : 1), H * 0.008);
+  grain(x, W, H, 0.05);
+  return { map: T(c), rough: T(rc, 1, 1, false) };
+}
+var _drumMats = new Map();
+function drumMat(col) {
+  let m = _drumMats.get(col);
+  if (!m) {
+    if (!DRUM_MAPS) DRUM_MAPS = drumMaps(TS(512), TS(512));
+    m = new THREE.MeshStandardMaterial({ map: DRUM_MAPS.map, roughnessMap: DRUM_MAPS.rough, color: new THREE.Color(col).multiplyScalar(1.55), roughness: 1, metalness: 0.35, envMapIntensity: 0.8 });
+    _drumMats.set(col, m);
+  }
+  return m;
+}
 function barrel(x, y, z, col, tipped) {
   y = snapSupport(x, z, y);
   if (y === null) return;
@@ -8738,8 +8881,9 @@ function barrel(x, y, z, col, tipped) {
     parts.push(lid);
     barrelGeoCache[key] = BGU.mergeGeometries(parts, false);
   }
-  const mat = col === "green" ? M.paintG : col === "blue" ? M.plastB : col === "orange" ? M.plastO : M.steel;
-  const m = meshAt(barrelGeoCache[key], mat, x, y + (tipped ? 0.3 : 0.44), z, { rotY: sr(0, 6.28) });
+  const plastic = col === "blue" || col === "orange";
+  const mat = col === "blue" ? M.plastB : col === "orange" ? M.plastO : drumMat(col === "green" ? 4870704 : 7039851);
+  const m = meshAt(plastic ? barrelGeoCache[key] : drumGeo(), mat, x, y + (tipped ? 0.3 : 0.44), z, { rotY: sr(0, 6.28) });
   if (tipped) {
     m.rotation.z = Math.PI / 2;
     m.rotation.y = sr(0, 6.28);
@@ -10649,19 +10793,10 @@ function table(x, y, z, rotY, flipped = false) {
 }
 function fuelBarrel(x, y, z, rotY = 0, col = 9251356) {
   const G = new THREE.Group();
-  const mat = cmat(col, { roughness: 0.55, metalness: 0.4 });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.29, 0.29, 0.88, 20), mat);
+  const body = new THREE.Mesh(drumGeo(), drumMat(col));
   body.position.y = 0.44;
+  body.rotation.y = rnd(0, 6.28);
   G.add(body);
-  for (const yy of [0.22, 0.44, 0.66]) {
-    const r = new THREE.Mesh(new THREE.TorusGeometry(0.295, 0.018, 6, 20), mat);
-    r.rotation.x = Math.PI / 2;
-    r.position.y = yy;
-    G.add(r);
-  }
-  const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 0.02, 20), M.dark);
-  lid.position.y = 0.885;
-  G.add(lid);
   if (!_fuelSignMat) {
     const c = document.createElement("canvas");
     c.width = 64;
@@ -10683,7 +10818,7 @@ function fuelBarrel(x, y, z, rotY = 0, col = 9251356) {
     _fuelSignMat = new THREE.MeshStandardMaterial({ map: t, transparent: true, roughness: 0.7 });
   }
   const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.2), _fuelSignMat);
-  sign.position.set(0, 0.5, 0.295);
+  sign.position.set(0, 0.5, 0.292);
   G.add(sign);
   G.position.set(x, y, z);
   G.rotation.y = rotY;
@@ -10700,16 +10835,7 @@ function fuelBarrel(x, y, z, rotY = 0, col = 9251356) {
   });
 }
 function dynBarrel(x, y, z, col = 5134918, tipped = false) {
-  const mat = cmat(col, { roughness: 0.6, metalness: 0.35 });
-  const parts = [new THREE.CylinderGeometry(0.29, 0.29, 0.88, 18)];
-  for (const yy of [-0.22, 0, 0.22]) {
-    const r = new THREE.TorusGeometry(0.295, 0.018, 5, 18);
-    r.rotateX(Math.PI / 2);
-    r.translate(0, yy, 0);
-    parts.push(r);
-  }
-  const g = mergeParts(parts);
-  const m = new THREE.Mesh(g, mat);
+  const m = new THREE.Mesh(drumGeo(), drumMat(col));
   m.castShadow = m.receiveShadow = true;
   m.position.set(x, y + (tipped ? 0.3 : 0.44), z);
   if (tipped) {
@@ -10792,55 +10918,202 @@ var GATES = [];
 var TEAM_SPOTS = [];
 var BASE_LIGHTS = [];
 var _contMats = {};
+// Окраска контейнера (серая, тонируется цветом материала): выгоревшие пятна, царапины до грунта,
+// ржавые точки и потёки от верхней кромки, грязь у низа. По v: 0 — низ панели, 1 — верх.
+var CONT_MAPS = null;
+function containerMaps(S) {
+  const [c, x] = cv(S, S), [rc, rx] = cv(S, S);
+  x.fillStyle = "#b9b9b9";
+  x.fillRect(0, 0, S, S);
+  rx.fillStyle = "#9c9c9c";
+  rx.fillRect(0, 0, S, S);
+  const blob = (ctx, px, py, r, col) => wrapDraw(ctx, S, () => {
+    const g = ctx.createRadialGradient(px, py, 1, px, py, r);
+    g.addColorStop(0, col);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, 7);
+    ctx.fill();
+  });
+  for (let i = 0; i < 70; i++) {
+    const v = si(150, 225);
+    blob(x, srnd() * S, srnd() * S, sr(20, 90), `rgba(${v},${v},${v},${sr(0.08, 0.22)})`);
+  }
+  for (let i = 0; i < 160; i++) {
+    const px = srnd() * S, py = srnd() * S, a = sr(-0.5, 0.5) + (srnd() < 0.5 ? 0 : Math.PI / 2), L = sr(6, 40);
+    x.strokeStyle = `rgba(${si(70, 95)},${si(60, 80)},${si(52, 70)},${sr(0.25, 0.6)})`;
+    x.lineWidth = sr(0.6, 1.6);
+    x.beginPath();
+    x.moveTo(px, py);
+    x.lineTo(px + Math.cos(a) * L, py + Math.sin(a) * L);
+    x.stroke();
+  }
+  for (let i = 0; i < 45; i++) {
+    const px = srnd() * S, py = srnd() * S, r = sr(1, 5);
+    blob(x, px, py, r * 2.2, `rgba(${si(105, 135)},${si(52, 68)},${si(24, 36)},${sr(0.25, 0.55)})`);
+    blob(rx, px, py, r * 2, "rgba(235,235,235,0.8)");
+  }
+  // потёки ржавчины от верхнего края и от случайных сколов
+  for (let i = 0; i < 70; i++) {
+    const px = srnd() * S, py = srnd() < 0.6 ? sr(0, S * 0.08) : srnd() * S, L = sr(S * 0.08, S * 0.45), w = sr(1, 4.5);
+    const g = x.createLinearGradient(0, py, 0, py + L);
+    g.addColorStop(0, `rgba(${si(100, 125)},${si(48, 62)},${si(22, 32)},${sr(0.35, 0.7)})`);
+    g.addColorStop(1, "rgba(100,50,25,0)");
+    x.fillStyle = g;
+    x.fillRect(px, py, w, L);
+    const gr = rx.createLinearGradient(0, py, 0, py + L);
+    gr.addColorStop(0, "rgba(225,225,225,0.7)");
+    gr.addColorStop(1, "rgba(225,225,225,0)");
+    rx.fillStyle = gr;
+    rx.fillRect(px, py, w, L);
+  }
+  const gd = x.createLinearGradient(0, S * 0.8, 0, S);
+  gd.addColorStop(0, "rgba(70,60,48,0)");
+  gd.addColorStop(1, "rgba(70,60,48,0.45)");
+  x.fillStyle = gd;
+  x.fillRect(0, S * 0.8, S, S * 0.2);
+  grain(x, S, S, 0.06);
+  grain(rx, S, S, 0.1);
+  return { map: T(c), rough: T(rc, 1, 1, false) };
+}
+// Трафаретная маркировка: коды владельца, тип 45G1, таблички CSC. Один атлас на все контейнеры.
+var CONT_DECAL = null;
+function containerDecals() {
+  const W = 1024, H = 512, [c, x] = cv(W, H);
+  x.clearRect(0, 0, W, H);
+  const codes = ["MSKU 481223 7", "TGHU 902114 3", "CAIU 553870 1", "SEGU 217765 0"];
+  x.fillStyle = "#eeeae2";
+  x.textBaseline = "top";
+  for (let i = 0; i < 4; i++) {
+    const ox = i % 2 * 512, oy = Math.floor(i / 2) * 256;
+    x.font = "700 54px Arial, sans-serif";
+    x.fillText(codes[i], ox + 24, oy + 22);
+    x.font = "700 40px Arial, sans-serif";
+    x.fillText("45G1", ox + 24, oy + 92);
+    x.font = "600 22px Arial, sans-serif";
+    x.fillText("MAX GROSS 30480 KG", ox + 24, oy + 150);
+    x.fillText("TARE 3750 KG", ox + 24, oy + 178);
+    x.fillStyle = "#b8b4aa";
+    x.fillRect(ox + 330, oy + 150, 150, 70);
+    x.fillStyle = "#2a2a2a";
+    x.font = "600 18px Arial, sans-serif";
+    x.fillText("CSC SAFETY", ox + 342, oy + 160);
+    x.fillText("APPROVAL", ox + 342, oy + 184);
+    x.fillStyle = "#eeeae2";
+  }
+  const t = T(c);
+  CONT_DECAL = new THREE.MeshStandardMaterial({ map: t, transparent: true, alphaTest: 0.35, roughness: 0.8, metalness: 0.1, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+  return CONT_DECAL;
+}
+// Трапециевидная гофра: профиль вдоль X, вытянут по Y, выступы наружу (+Z)
+function corrGeo(len, h, depth = 0.045, pitch = 0.28) {
+  const n = Math.max(1, Math.round(len / pitch)), p = len / n, pts = [];
+  for (let i = 0; i < n; i++) {
+    const x0 = -len / 2 + i * p;
+    pts.push([x0, 0], [x0 + p * 0.1, depth], [x0 + p * 0.45, depth], [x0 + p * 0.55, 0]);
+  }
+  pts.push([len / 2, 0]);
+  const pos = [], uv = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+    const ua = ax / len + 0.5, ub = bx / len + 0.5;
+    pos.push(ax, -h / 2, az, bx, -h / 2, bz, bx, h / 2, bz, ax, -h / 2, az, bx, h / 2, bz, ax, h / 2, az);
+    uv.push(ua, 0, ub, 0, ub, 1, ua, 0, ub, 1, ua, 1);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.computeVertexNormals();
+  return g;
+}
+var _contN = 0;
 function container(x, z, rotY, col = 5992314, y = 0) {
+  if (!CONT_MAPS) CONT_MAPS = containerMaps(TS(512));
   let mat = _contMats[col];
   if (!mat) {
     mat = new THREE.MeshStandardMaterial({
-      map: M.corr.map,
-      normalMap: M.corr.normalMap,
-      normalScale: new THREE.Vector2(1.1, 1.1),
-      color: new THREE.Color(col).multiplyScalar(4.2),
-      roughness: 0.78,
-      metalness: 0.15,
+      map: CONT_MAPS.map,
+      roughnessMap: CONT_MAPS.rough,
+      color: new THREE.Color(col).multiplyScalar(2.3),
+      roughness: 1,
+      metalness: 0.3,
       envMapIntensity: 0.7
     });
     _contMats[col] = mat;
   }
   const L = 6.06, W = 2.44, H = 2.59;
   const G = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(L - 0.1, H - 0.12, W - 0.08), mat);
-  const uv = body.geometry.attributes.uv;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 3, uv.getY(i) * 1.3);
-  body.position.y = H / 2;
-  G.add(body);
+  const add = (geo, m, px, py, pz, ry = 0) => {
+    const o = new THREE.Mesh(geo, m);
+    o.position.set(px, py, pz);
+    o.rotation.y = ry;
+    G.add(o);
+    return o;
+  };
+  const uvScale = (g, su, sv) => {
+    const a = g.attributes.uv;
+    for (let i = 0; i < a.count; i++) a.setXY(i, a.getX(i) * su, a.getY(i) * sv);
+    return g;
+  };
+  // боковины, глухой торец и крыша — настоящая гофра
+  for (const sz of [-1, 1]) add(uvScale(corrGeo(L - 0.3, H - 0.26), 3, 1), mat, 0, H / 2, sz * (W / 2 - 0.05), sz > 0 ? 0 : Math.PI);
+  add(uvScale(corrGeo(W - 0.3, H - 0.26), 1.2, 1), mat, -L / 2 + 0.05, H / 2, 0, -Math.PI / 2);
+  const roof = uvScale(corrGeo(L - 0.3, W - 0.24, 0.022, 0.5), 3, 1.2);
+  roof.rotateX(-Math.PI / 2);
+  add(roof, mat, 0, H - 0.07, 0);
+  // внутренний короб закрывает щели между панелями и держит тень цельной
+  add(new THREE.BoxGeometry(L - 0.2, H - 0.2, W - 0.16), mat, 0, H / 2, 0);
   const frame2 = cmat(4869455, { roughness: 0.7, metalness: 0.4 });
+  const dark = cmat(2239012, { roughness: 0.75, metalness: 0.45 });
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.16, H, 0.16), frame2);
-    post.position.set(sx * (L / 2 - 0.08), H / 2, sz * (W / 2 - 0.08));
-    G.add(post);
-    const cast = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.18), frame2);
-    cast.position.set(sx * (L / 2 - 0.08), H - 0.06, sz * (W / 2 - 0.08));
-    G.add(cast);
-  }
-  for (const yy of [0.08, H - 0.08]) for (const sz of [-1, 1]) {
-    const r = new THREE.Mesh(new THREE.BoxGeometry(L, 0.14, 0.12), frame2);
-    r.position.set(0, yy, sz * (W / 2 - 0.06));
-    G.add(r);
-  }
-  for (const sz of [-1, 1]) {
-    const d = new THREE.Mesh(new THREE.BoxGeometry(0.05, H - 0.3, W / 2 - 0.1), mat);
-    d.position.set(L / 2 - 0.02, H / 2, sz * W / 4);
-    G.add(d);
-    for (const o of [-0.35, 0.35]) {
-      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, H - 0.2, 6), M.steel);
-      bar.position.set(L / 2 + 0.03, H / 2, sz * W / 4 + o * 0.6);
-      G.add(bar);
+    add(new THREE.BoxGeometry(0.16, H, 0.16), frame2, sx * (L / 2 - 0.08), H / 2, sz * (W / 2 - 0.08));
+    // угловые фитинги с проёмами под твистлоки
+    for (const yy of [0.075, H - 0.075]) {
+      add(new THREE.BoxGeometry(0.18, 0.15, 0.18), frame2, sx * (L / 2 - 0.08), yy, sz * (W / 2 - 0.08));
+      add(new THREE.BoxGeometry(0.06, 0.05, 0.02), dark, sx * (L / 2 - 0.08), yy, sz * (W / 2 + 0.012));
+      add(new THREE.BoxGeometry(0.02, 0.05, 0.08), dark, sx * (L / 2 + 0.012), yy, sz * (W / 2 - 0.08));
     }
   }
+  for (const yy of [0.08, H - 0.08]) for (const sz of [-1, 1]) add(new THREE.BoxGeometry(L, 0.14, 0.12), frame2, 0, yy, sz * (W / 2 - 0.06));
+  for (const sx of [-1, 1]) for (const yy of [0.1, H - 0.12]) add(new THREE.BoxGeometry(0.12, yy > 1 ? 0.24 : 0.2, W - 0.2), frame2, sx * (L / 2 - 0.06), yy, 0);
+  // карманы под вилы погрузчика
+  for (const sz of [-1, 1]) for (const ox of [-1.03, 1.03]) add(new THREE.BoxGeometry(0.36, 0.11, 0.03), dark, ox, 0.1, sz * (W / 2 + 0.005));
+  // двери: гофрированные створки, четыре запорные штанги с кулачками и рукоятками, петли
+  for (const sz of [-1, 1]) {
+    const leaf = corrGeo(W / 2 - 0.12, H - 0.34, 0.025, 0.3);
+    uvScale(leaf, 0.6, 1);
+    add(leaf, mat, L / 2 - 0.04, H / 2, sz * (W / 4 - 0.01), Math.PI / 2);
+    add(new THREE.BoxGeometry(0.04, H - 0.3, 0.06), frame2, L / 2 - 0.02, H / 2, sz * 0.03);
+    for (const o of [0.2, 0.62]) {
+      const bz = sz * (W / 4 + (o - 0.41) * 0.95);
+      add(new THREE.CylinderGeometry(0.021, 0.021, H - 0.22, 8), M.steel, L / 2 + 0.035, H / 2, bz);
+      for (const yy of [0.2, H - 0.2]) add(new THREE.BoxGeometry(0.06, 0.08, 0.07), frame2, L / 2 + 0.03, yy, bz);
+      for (const yy of [0.42, H - 0.42]) add(new THREE.BoxGeometry(0.04, 0.04, 0.05), frame2, L / 2 + 0.035, yy, bz);
+      const handle = add(new THREE.BoxGeometry(0.025, 0.035, 0.34), M.steel, L / 2 + 0.07, 1.12, bz + sz * 0.15);
+      handle.rotation.x = 0.08 * sz;
+      add(new THREE.BoxGeometry(0.035, 0.07, 0.05), dark, L / 2 + 0.05, 1.12, bz + sz * 0.3);
+    }
+    for (const yy of [0.35, 0.95, 1.65, 2.25]) add(new THREE.CylinderGeometry(0.03, 0.03, 0.12, 8), frame2, L / 2 + 0.02, yy, sz * (W / 2 - 0.12));
+  }
+  // маркировка на двери и на боковине
+  const dm = CONT_DECAL || containerDecals();
+  const code = _contN++ % 4, u0 = code % 2 * 0.5, v0 = code < 2 ? 0.5 : 0;
+  const decal = (w, h, px, py, pz, ry) => {
+    const g = new THREE.PlaneGeometry(w, h);
+    const a = g.attributes.uv;
+    for (let i = 0; i < a.count; i++) a.setXY(i, u0 + a.getX(i) * 0.5, v0 + a.getY(i) * 0.5);
+    const d = add(g, dm, px, py, pz, ry);
+    d.castShadow = false;
+    d.userData.noShadow = true;
+    return d;
+  };
+  decal(0.84, 0.42, L / 2 + 0.03, H - 0.55, -W / 4, Math.PI / 2);
+  decal(1.3, 0.65, L / 2 - 1.1, H - 0.55, W / 2 - 0.005 + 0.04, 0);
   G.position.set(x, y, z);
   G.rotation.y = rotY;
   G.traverse((o) => {
-    if (o.isMesh) {
+    if (o.isMesh && !o.userData.noShadow) {
       o.castShadow = true;
       o.receiveShadow = true;
     }
@@ -13766,6 +14039,7 @@ async function build() {
   buildFloorDetails();
   buildTag();
   addSurfaceDetail(M.conc, { stains: true, detail: 0.45 });
+  if (M.floor) addSurfaceDetail(M.floor, { stains: true, slabs: true, detail: 0.5 });
   if (M.concPit) addSurfaceDetail(M.concPit, { stains: true, detail: 0.45 });
   for (const m of [M.osb, M.osb2, M.wood, M.woodDark, M.plywood]) addSurfaceDetail(m, { detail: 0.22 });
   addSurfaceDetail(M.panel, { detail: 0.3 });
@@ -14214,11 +14488,15 @@ function adaptQuality(realDt) {
     DYNRES.t = 0;
     DYNRES.slow = 0;
     if (P.aoPass && P.aoPass.enabled) P.aoPass.enabled = false;
+    else if (P.volPass && P.volPass.enabled && P.volPass.scale > 0.3) P.volPass.setScale(0.25);
     else if (DYNRES.li < DYNRES.levels.length - 1) setRenderScale(DYNRES.levels[++DYNRES.li]);
+    else if (P.volPass && P.volPass.enabled) setVolumetric(false);
   } else if (DYNRES.fast > 10 && DYNRES.t > 10) {
     DYNRES.t = 0;
     DYNRES.fast = 0;
-    if (DYNRES.li > 0) setRenderScale(DYNRES.levels[--DYNRES.li]);
+    if (P.volPass && !P.volPass.enabled) setVolumetric(true);
+    else if (DYNRES.li > 0) setRenderScale(DYNRES.levels[--DYNRES.li]);
+    else if (P.volPass && P.volPass.scale < Q.vol) P.volPass.setScale(Q.vol);
     else if (P.aoPass && !P.aoPass.enabled) P.aoPass.enabled = true;
   }
 }
@@ -14286,7 +14564,7 @@ function step(dt) {
   }
   const active = PH.dyn.some((r) => !r.keep && r.body.isActive());
   if (!SUN_UP) {
-  } else if (active && shadowTick % (Q.lights >= 6 ? 2 : 4) === 0) renderer.shadowMap.needsUpdate = true;
+  } else if (active && shadowTick % (Q.lights >= 6 ? 3 : 6) === 0) renderer.shadowMap.needsUpdate = true;
   else if (FLAG_SHADOWS && shadowTick % 15 === 0) renderer.shadowMap.needsUpdate = true;
   updateEye(dt);
   SND.listener();

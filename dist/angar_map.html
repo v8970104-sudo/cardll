@@ -5148,7 +5148,9 @@ var QPRESETS = {
     softShadow: false,
     cloth: 0.45,
     target: 45,
-    minPR: 0.6
+    minPR: 0.6,
+    vol: 0,
+    volSteps: 0
   },
   med: {
     pixelRatio: 1.25,
@@ -5168,7 +5170,9 @@ var QPRESETS = {
     softShadow: true,
     cloth: 0.7,
     target: 50,
-    minPR: 0.7
+    minPR: 0.7,
+    vol: 0.35,
+    volSteps: 18
   },
   high: {
     pixelRatio: 1.5,
@@ -5188,7 +5192,9 @@ var QPRESETS = {
     softShadow: true,
     cloth: 1,
     target: 55,
-    minPR: 0.8
+    minPR: 0.8,
+    vol: 0.5,
+    volSteps: 28
   },
   ultra: {
     pixelRatio: 1.75,
@@ -5208,7 +5214,9 @@ var QPRESETS = {
     softShadow: true,
     cloth: 1,
     target: 58,
-    minPR: 0.9
+    minPR: 0.9,
+    vol: 0.5,
+    volSteps: 40
   }
 };
 function autoQuality() {
@@ -7844,7 +7852,8 @@ function buildShadowProxy() {
     const geo = BGU.mergeGeometries(idx ? list : list.map((g) => g.index ? g.toNonIndexed() : g), false);
     list.length = 0;
     if (!geo) continue;
-    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ side, colorWrite: false }));
+    // в основном проходе прокси ничего не пишет: он нужен только карте теней
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ side, colorWrite: false, depthWrite: false }));
     m.name = "baked_shadow";
     m.castShadow = true;
     m.receiveShadow = false;
@@ -8887,7 +8896,8 @@ function buildRoof() {
       if (b - a < 0.12) continue;
       const y0 = roofY(z0), y1 = roofY(z1);
       const len = Math.hypot(z1 - z0, y1 - y0);
-      const g = new THREE.PlaneGeometry(b - a, len);
+      // листы внахлёст: стык встык пропускал в карте теней полосы солнца на пол
+      const g = new THREE.PlaneGeometry(b - a, len + 0.12);
       const uv = g.attributes.uv;
       for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) * (b - a) * 0.3, uv.getY(k) * len * 0.3);
       const m = new THREE.Mesh(g, M.roof);
@@ -9091,7 +9101,8 @@ function updateDeadLamp(dt, t, level) {
   D2.spot.userData.nominal = 42 * level;
   D2.cone.material.uniforms.uI.value = k;
   D2.halo.material.opacity = Math.min(1, k * 0.9);
-  D2.cone.visible = D2.halo.visible = k > 0.01;
+  D2.halo.visible = k > 0.01;
+  D2.cone.visible = D2.halo.visible && !VOL_ON;
   if (D2.st === "stutter" && D2.flash > 0.5 && Math.random() < dt * 3 * level) {
     const p = D2.rec.mesh.position, ex = p.x + (Math.random() < 0.5 ? -0.86 : 0.86);
     for (let n = 0; n < 5; n++) FXS.spark.spawn({
@@ -9594,11 +9605,16 @@ function buildDust() {
       uPixelRatio: { value: renderer.getPixelRatio() },
       uShaft: { value: DUST_SHAFTS },
       uShaftN: { value: 0 },
-      uShaftDir: { value: new THREE.Vector3(0, -1, 0) }
+      uShaftDir: { value: new THREE.Vector3(0, -1, 0) },
+      tShadow: { value: null },
+      uSunMat: { value: new THREE.Matrix4() },
+      uUseShadow: { value: 0 }
     },
     vertexShader: `
+      #include <packing>
       attribute float aRnd; uniform float uTime,uSize,uPixelRatio;
       uniform vec4 uShaft[24]; uniform int uShaftN; uniform vec3 uShaftDir;
+      uniform sampler2D tShadow; uniform mat4 uSunMat; uniform float uUseShadow;
       varying float vA;
       void main(){
         vec3 p = position;
@@ -9611,12 +9627,19 @@ function buildDust() {
         gl_PointSize = clamp(uSize*uPixelRatio*(9.0/max(-mv.z,1.0)), 0.6, 3.2);
         // пыль видна в столбах солнца, вне их — едва заметна (раньше светился весь объём)
         float lit = 0.0;
-        for(int i=0;i<24;i++){
-          if(i >= uShaftN) break;
-          vec3 o = uShaft[i].xyz; vec3 dp = p - o;
-          float t = max(dot(dp, uShaftDir), 0.0);
-          float rr = uShaft[i].w*(0.55 + 0.31*clamp(t/max(o.y, 1.0), 0.0, 1.5));
-          lit = max(lit, 1.0 - smoothstep(rr*0.6, rr*1.05, length(dp - uShaftDir*t)));
+        if(uUseShadow > 0.5){
+          // пылинка горит, только если на неё падает солнце (по карте теней)
+          vec4 sc = uSunMat*vec4(p, 1.0);
+          if(sc.x > 0.0 && sc.x < 1.0 && sc.y > 0.0 && sc.y < 1.0 && sc.z < 1.0)
+            lit = step(sc.z - 0.002, unpackRGBAToDepth(texture2D(tShadow, sc.xy)));
+        } else {
+          for(int i=0;i<24;i++){
+            if(i >= uShaftN) break;
+            vec3 o = uShaft[i].xyz; vec3 dp = p - o;
+            float t = max(dot(dp, uShaftDir), 0.0);
+            float rr = uShaft[i].w*(0.55 + 0.31*clamp(t/max(o.y, 1.0), 0.0, 1.5));
+            lit = max(lit, 1.0 - smoothstep(rr*0.6, rr*1.05, length(dp - uShaftDir*t)));
+          }
         }
         vA = (0.30 + 0.70*aRnd) * smoothstep(0.0,3.0,p.y) * mix(0.1, 1.0, lit);
       }`,
@@ -9792,7 +9815,8 @@ function applyDaylight(t) {
   M.glass.color.copy(k.skyMid).lerp(_kc.setHex(12898262), 1 - nightK * 0.86);
   M.glass.emissiveIntensity = lerp(0.07, 0.02, nightK);
   const shaftK = clamp(k.sunI / 4.2, 0, 1) * smoothstep(-0.02, 0.22, elev);
-  const shaftsOn = shaftK > 0.02;
+  // при объёмном свете лучи честные — старые конусы-заглушки только мешают
+  const shaftsOn = shaftK > 0.02 && !VOL_ON;
   shaftMat.uniforms.uOpacity.value = 0.06 * shaftK * (1 + 2.2 * SMOKE.level);
   SPOT_MAT.opacity = 0.075 * shaftK;
   for (const s of SHAFTS) s.visible = shaftsOn;
@@ -9944,6 +9968,21 @@ var SceneRenderPass = class extends import_RenderPass.RenderPass {
     super.render(r, writeBuffer, readBuffer, dt, mask);
   }
 };
+// three.js отбирает теневые объекты по слоям камеры, которой рисуют кадр, а не теневой камеры:
+// без этого запечённый прокси (кровля, стены, фермы, контейнеры) в карту теней не попадал
+// и солнце светило сквозь крышу. Карта обновляется в первом render() после needsUpdate —
+// это может быть и снимок окружения кубической камерой, поэтому слой включается здесь.
+(function shadowLayerFix() {
+  const render = renderer.render.bind(renderer);
+  renderer.render = (sc, cam) => {
+    const sm = renderer.shadowMap;
+    if (sc === scene && sm.enabled && sm.needsUpdate && !cam.layers.isEnabled(LAYER_SHADOW)) {
+      cam.layers.enable(LAYER_SHADOW);
+      render(sc, cam);
+      cam.layers.disable(LAYER_SHADOW);
+    } else render(sc, cam);
+  };
+})();
 var WAVES = [];
 function shockwave(p, k) {
   WAVES.push({ p: p.clone(), t: 0, dur: 0.55, k });
@@ -10046,6 +10085,305 @@ function updateWaves(dt) {
     if (WAVES[i].t >= WAVES[i].dur) WAVES.splice(i, 1);
   }
 }
+// Объёмный свет: лучи солнца (по его карте теней — через проёмы кровли, окна и ворота,
+// с тенями от ферм и укрытий), конусы прожекторов и ореолы точечных источников (лампы, огонь).
+// Считается в пониженном разрешении, размывается с учётом глубины и добавляется к кадру.
+var VOL_ON = Q.vol > 0;
+var VOL_SPOTS = 6;
+var VOL_POINTS = 8;
+// множители подобраны на глаз: прожекторы и лампы в кд намного слабее солнца
+var VOL = { density: 8e-3, sun: 1, spots: 5, points: 0.2, maxDist: 55 };
+function volNoiseTex(S = 32) {
+  const d = new Uint8Array(S * S * S);
+  for (let i = 0; i < d.length; i++) d[i] = Math.floor(rnd2() * 256);
+  // два прохода сглаживания по решётке: из белого шума — мягкие клубы
+  for (let pass = 0; pass < 2; pass++) {
+    const s = new Uint8Array(d);
+    const at = (x, y, z) => s[((z + S) % S * S + (y + S) % S) * S + (x + S) % S];
+    for (let z = 0; z < S; z++) for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      d[(z * S + y) * S + x] = (at(x, y, z) * 2 + at(x - 1, y, z) + at(x + 1, y, z) + at(x, y - 1, z) + at(x, y + 1, z) + at(x, y, z - 1) + at(x, y, z + 1)) / 8;
+    }
+  }
+  let lo = 255, hi = 0;
+  for (const v of d) {
+    lo = Math.min(lo, v);
+    hi = Math.max(hi, v);
+  }
+  for (let i = 0; i < d.length; i++) d[i] = Math.round((d[i] - lo) / Math.max(1, hi - lo) * 255);
+  const t = new THREE.Data3DTexture(d, S, S, S);
+  t.format = THREE.RedFormat;
+  t.wrapS = t.wrapT = t.wrapR = THREE.RepeatWrapping;
+  t.minFilter = t.magFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return t;
+}
+var VOL_GLSL_COMMON = `
+  uniform float uNear, uFar;
+  float volLinZ(float d){ return uNear*uFar/(uFar - d*(uFar - uNear)); }`;
+var VolumetricPass = class extends import_Pass.Pass {
+  constructor(scenePass, scale, steps) {
+    super();
+    this.scenePass = scenePass;
+    this.scale = scale;
+    const rtOpt = { type: THREE.HalfFloatType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter };
+    this.rtA = new THREE.WebGLRenderTarget(1, 1, rtOpt);
+    this.rtB = new THREE.WebGLRenderTarget(1, 1, rtOpt);
+    const arr = (n, f) => Array.from({ length: n }, f);
+    this.march = new THREE.ShaderMaterial({
+      defines: { STEPS: steps, NSPOT: VOL_SPOTS, NPT: VOL_POINTS },
+      uniforms: {
+        tDepth: { value: null },
+        tShadow: { value: null },
+        tNoise: { value: volNoiseTex() },
+        uProjInv: { value: new THREE.Matrix4() },
+        uViewInv: { value: new THREE.Matrix4() },
+        uSunMat: { value: new THREE.Matrix4() },
+        uCam: { value: new THREE.Vector3() },
+        uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+        uSunCol: { value: new THREE.Color(0, 0, 0) },
+        uNear: { value: 0.04 },
+        uFar: { value: 400 },
+        uDensity: { value: VOL.density },
+        uMaxDist: { value: 70 },
+        uTime: { value: 0 },
+        uSmoke: { value: new THREE.Vector3(0, 8, 3) },
+        uSpotPos: { value: arr(VOL_SPOTS, () => new THREE.Vector3()) },
+        uSpotDir: { value: arr(VOL_SPOTS, () => new THREE.Vector3(0, -1, 0)) },
+        uSpotCol: { value: arr(VOL_SPOTS, () => new THREE.Color(0, 0, 0)) },
+        uSpotK: { value: arr(VOL_SPOTS, () => new THREE.Vector4(0.9, 0.95, 20, 2)) },
+        uSpotN: { value: 0 },
+        uPtPos: { value: arr(VOL_POINTS, () => new THREE.Vector3()) },
+        uPtCol: { value: arr(VOL_POINTS, () => new THREE.Vector4()) },
+        uPtN: { value: 0 }
+      },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: `
+        #include <packing>
+        uniform sampler2D tDepth, tShadow; uniform highp sampler3D tNoise;
+        uniform mat4 uProjInv, uViewInv, uSunMat;
+        uniform vec3 uCam, uSunDir, uSunCol, uSmoke;
+        uniform float uDensity, uMaxDist, uTime;
+        uniform vec3 uSpotPos[NSPOT], uSpotDir[NSPOT], uSpotCol[NSPOT]; uniform vec4 uSpotK[NSPOT]; uniform int uSpotN;
+        uniform vec3 uPtPos[NPT]; uniform vec4 uPtCol[NPT]; uniform int uPtN;
+        varying vec2 vUv;
+        ${VOL_GLSL_COMMON}
+        const float PI4 = 12.566371;
+        float hg(float c, float g){ float g2 = g*g; return (1.0 - g2)/(PI4*pow(max(1.0 + g2 - 2.0*g*c, 1e-3), 1.5)); }
+        // пыль в воздухе: крупные частицы рассеивают вперёд, поэтому луч ярче, когда смотришь к источнику
+        float phase(float c){ return 0.55*hg(c, 0.62) + 0.45/PI4; }
+        float density(vec3 p){
+          vec3 w = vec3(uTime*0.05, uTime*0.012, uTime*0.03);
+          float n = texture(tNoise, p*0.045 + w).r*0.6 + texture(tNoise, p*0.13 - w*1.7).r*0.4;
+          float d = (0.3 + 1.4*n*n) * (0.75 + 0.25*exp(-max(p.y, 0.0)*0.12));
+          // дым под кровлей от пожара: плотный слой, в котором лучи становятся стенами света
+          d += uSmoke.x*smoothstep(uSmoke.y - uSmoke.z, uSmoke.y + 0.5, p.y)*(0.6 + 0.8*n);
+          return d*uDensity;
+        }
+        float sunVis(vec3 p){
+          vec4 sc = uSunMat*vec4(p, 1.0);
+          if(sc.x <= 0.0 || sc.x >= 1.0 || sc.y <= 0.0 || sc.y >= 1.0 || sc.z >= 1.0) return 1.0;
+          return step(sc.z - 0.002, unpackRGBAToDepth(texture2D(tShadow, sc.xy)));
+        }
+        void main(){
+          float d = texture2D(tDepth, vUv).r;
+          vec4 vp = uProjInv*vec4(vUv*2.0 - 1.0, d*2.0 - 1.0, 1.0);
+          vp /= vp.w;
+          vec3 wp = (uViewInv*vp).xyz;
+          vec3 rd = wp - uCam; float L = length(rd); rd /= max(L, 1e-4);
+          float Lm = min(L, uMaxDist);
+          // шаги распределены квадратично (гуще у глаза), смещение — interleaved gradient noise
+          float j = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+          float ps = phase(dot(rd, uSunDir));
+          vec3 acc = vec3(0.0); float T = 1.0, tPrev = 0.0;
+          for(int i = 0; i < STEPS; i++){
+            float u = (float(i) + j)/float(STEPS);
+            float t = u*u*Lm; float dt = t - tPrev; tPrev = t;
+            vec3 p = uCam + rd*t;
+            float sig = density(p);
+            vec3 Li = uSunCol*(sunVis(p)*ps);
+            for(int k = 0; k < NSPOT; k++){
+              if(k >= uSpotN) break;
+              vec3 l = uSpotPos[k] - p; float dl = length(l); l /= dl;
+              float cone = smoothstep(uSpotK[k].x, uSpotK[k].y, dot(-l, uSpotDir[k]));
+              float rr = dl/uSpotK[k].z; float cut = clamp(1.0 - rr*rr*rr*rr, 0.0, 1.0);
+              Li += uSpotCol[k]*(cone*cut*cut/max(pow(dl, uSpotK[k].w), 1.5)*phase(dot(rd, l)));
+            }
+            acc += Li*sig*dt*T;
+            T *= exp(-sig*dt*0.35);
+          }
+          // точечные источники — аналитический интеграл 1/r² вдоль луча: без шума и без шагов
+          float sig0 = uDensity*0.9;
+          for(int k = 0; k < NPT; k++){
+            if(k >= uPtN) break;
+            vec3 c = uPtPos[k] - uCam; float t0 = dot(c, rd);
+            float h = sqrt(max(dot(c, c) - t0*t0, 0.0)) + 0.6;
+            float I = (atan((Lm - t0)/h) + atan(t0/h))/h;
+            float fall = 1.0 - smoothstep(uPtCol[k].w*0.25, uPtCol[k].w, h);
+            acc += uPtCol[k].rgb*(I*fall*sig0/PI4);
+          }
+          acc = max(acc, vec3(0.0));
+          if(acc.r != acc.r || acc.g != acc.g || acc.b != acc.b) acc = vec3(0.0);
+          gl_FragColor = vec4(min(acc, vec3(64.0)), volLinZ(d));
+        }`,
+      depthTest: false,
+      depthWrite: false
+    });
+    this.blur = new THREE.ShaderMaterial({
+      uniforms: { tSrc: { value: null }, uDir: { value: new THREE.Vector2() } },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: `
+        uniform sampler2D tSrc; uniform vec2 uDir; varying vec2 vUv;
+        void main(){
+          vec4 c0 = texture2D(tSrc, vUv);
+          vec3 s = c0.rgb*0.2; float ws = 0.2;
+          for(int i = 1; i <= 4; i++){
+            float w = exp(-float(i*i)/8.0)*0.2;
+            for(int sgn = -1; sgn <= 1; sgn += 2){
+              vec4 c = texture2D(tSrc, vUv + uDir*float(i*sgn));
+              float wz = w*exp(-abs(c.a - c0.a)/(0.15 + c0.a*0.04));
+              s += c.rgb*wz; ws += wz;
+            }
+          }
+          gl_FragColor = vec4(s/ws, c0.a);
+        }`,
+      depthTest: false,
+      depthWrite: false
+    });
+    this.comp = new THREE.ShaderMaterial({
+      uniforms: { tVol: { value: null }, tDepth: { value: null }, tScene: { value: null }, uMode: { value: 0 }, uTexel: { value: new THREE.Vector2() }, uNear: { value: 0.04 }, uFar: { value: 400 } },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: `
+        uniform sampler2D tVol, tDepth, tScene; uniform float uMode; uniform vec2 uTexel; varying vec2 vUv;
+        ${VOL_GLSL_COMMON}
+        void main(){
+          float z = volLinZ(texture2D(tDepth, vUv).r);
+          // билатеральный апсемплинг: из четырёх соседних texel берутся близкие по глубине
+          vec2 tc = vUv/uTexel - 0.5, f = fract(tc), b = (floor(tc) + 0.5)*uTexel;
+          vec3 s = vec3(0.0); float ws = 1e-4;
+          for(int k = 0; k < 4; k++){
+            vec2 o = vec2(float(k - (k/2)*2), float(k/2));
+            vec4 c = texture2D(tVol, b + o*uTexel);
+            float wb = (o.x > 0.5 ? f.x : 1.0 - f.x)*(o.y > 0.5 ? f.y : 1.0 - f.y);
+            float w = (wb + 1e-3)/(abs(c.a - z)/(0.1 + z*0.03) + 0.05);
+            s += c.rgb*w; ws += w;
+          }
+          vec3 v = s/ws;
+          vec3 base = uMode > 0.5 ? texture2D(tScene, vUv).rgb : vec3(0.0);
+          gl_FragColor = vec4(base + v, 1.0);
+        }`,
+      depthTest: false,
+      depthWrite: false
+    });
+    this.quad = new import_Pass.FullScreenQuad(this.march);
+    this._spots = [];
+  }
+  setSize(w, h) {
+    const W = Math.max(1, Math.round(w * this.scale)), H = Math.max(1, Math.round(h * this.scale));
+    this.rtA.setSize(W, H);
+    this.rtB.setSize(W, H);
+    this.comp.uniforms.uTexel.value.set(1 / W, 1 / H);
+  }
+  gather() {
+    const U = this.march.uniforms;
+    const sunOn = VOL.sun > 0 && sun.intensity > 4e-3 && renderer.shadowMap.enabled && sun.shadow.map;
+    U.tShadow.value = sunOn ? sun.shadow.map.texture : null;
+    U.uSunMat.value.copy(sun.shadow.matrix);
+    U.uSunDir.value.copy(SUN_DIR);
+    U.uSunCol.value.copy(sun.color).multiplyScalar(sunOn ? sun.intensity * VOL.sun : 0);
+    const sp = this._spots;
+    sp.length = 0;
+    for (const S of SPOOL) if (S.intensity > 0.05 && S.position.y > -50) sp.push(S);
+    if (DEAD_LAMP.spot && DEAD_LAMP.spot.castShadow && DEAD_LAMP.spot.intensity > 0.05) sp.push(DEAD_LAMP.spot);
+    let n = 0;
+    for (const S of sp) {
+      if (n >= VOL_SPOTS) break;
+      U.uSpotPos.value[n].copy(S.position);
+      U.uSpotDir.value[n].subVectors(S.target.position, S.position).normalize();
+      U.uSpotCol.value[n].copy(S.color).multiplyScalar(S.intensity * VOL.spots);
+      U.uSpotK.value[n].set(Math.cos(S.angle), Math.cos(S.angle * (1 - S.penumbra * 0.85)), S.distance || 60, S.decay);
+      n++;
+    }
+    U.uSpotN.value = n;
+    n = 0;
+    for (const P of PPOOL) {
+      if (n >= VOL_POINTS) break;
+      if (P.intensity < 0.05 || P.position.y < -50) continue;
+      U.uPtPos.value[n].copy(P.position);
+      U.uPtCol.value[n].set(P.color.r * P.intensity * VOL.points, P.color.g * P.intensity * VOL.points, P.color.b * P.intensity * VOL.points, P.distance || 20);
+      n++;
+    }
+    U.uPtN.value = n;
+    const fu = FOG_U.uSmoke.value;
+    // сажевый дым тёмный (альбедо низкое): свет в нём виден, но пеленой он стать не должен
+    U.uSmoke.value.set(SMOKE.level * 0.9, fu.y, fu.z);
+    U.uDensity.value = VOL.density * (1 + 0.4 * SMOKE.level);
+    U.uMaxDist.value = VOL.maxDist;
+    U.uTime.value = GAME_T;
+    if (dust) {
+      const D = dust.material.uniforms;
+      D.uUseShadow.value = sunOn ? 1 : 0;
+      D.tShadow.value = sunOn ? sun.shadow.map.texture : null;
+      D.uSunMat.value.copy(sun.shadow.matrix);
+    }
+  }
+  render(r, writeBuffer, readBuffer) {
+    const src = this.scenePass.target, depth = src && src.depthTexture;
+    if (!depth) {
+      this.needsSwap = false;
+      return;
+    }
+    camera.updateMatrixWorld();
+    const U = this.march.uniforms;
+    this.gather();
+    U.tDepth.value = depth;
+    U.uProjInv.value.copy(camera.projectionMatrixInverse);
+    U.uViewInv.value.copy(camera.matrixWorld);
+    U.uCam.value.setFromMatrixPosition(camera.matrixWorld);
+    U.uNear.value = this.comp.uniforms.uNear.value = camera.near;
+    U.uFar.value = this.comp.uniforms.uFar.value = camera.far;
+    if (!U.tShadow.value) {
+      U.uSunCol.value.setRGB(0, 0, 0);
+      U.tShadow.value = depth;
+    }
+    const auto = r.autoClear;
+    r.autoClear = false;
+    this.quad.material = this.march;
+    r.setRenderTarget(this.rtA);
+    this.quad.render(r);
+    const B = this.blur.uniforms, texel = this.comp.uniforms.uTexel.value;
+    this.quad.material = this.blur;
+    B.tSrc.value = this.rtA.texture;
+    B.uDir.value.set(texel.x, 0);
+    r.setRenderTarget(this.rtB);
+    this.quad.render(r);
+    B.tSrc.value = this.rtB.texture;
+    B.uDir.value.set(0, texel.y);
+    r.setRenderTarget(this.rtA);
+    this.quad.render(r);
+    const C = this.comp.uniforms;
+    C.tVol.value = this.rtA.texture;
+    C.tDepth.value = depth;
+    this.quad.material = this.comp;
+    // Писать в буфер, к которому прикреплена читаемая глубина, нельзя (feedback loop):
+    // если кадр лежит в чужом буфере — просто добавляем свет поверх, иначе копируем в другой.
+    if (readBuffer !== src && !this.renderToScreen) {
+      C.uMode.value = 0;
+      this.comp.blending = THREE.AdditiveBlending;
+      this.comp.transparent = true;
+      r.setRenderTarget(readBuffer);
+      this.needsSwap = false;
+    } else {
+      C.uMode.value = 1;
+      C.tScene.value = readBuffer.texture;
+      this.comp.blending = THREE.NoBlending;
+      this.comp.transparent = false;
+      r.setRenderTarget(this.renderToScreen ? null : writeBuffer);
+      this.needsSwap = true;
+    }
+    this.quad.render(r);
+    r.autoClear = auto;
+  }
+};
 var composer;
 var bloomPass;
 var gradePass;
@@ -10053,6 +10391,7 @@ var smaaPass;
 var aoPass;
 var vmPass;
 var fxPass;
+var volPass;
 var scenePass;
 function buildComposer() {
   composer = new import_EffectComposer.EffectComposer(renderer);
@@ -10078,14 +10417,22 @@ function buildComposer() {
     aoPass.overrideVisibility = function() {
       this._mask = camera.layers.mask;
       camera.layers.disable(LAYER_FX);
+      // точки пыли в буфере глубины/нормалей AO дают чёрные квадраты в воздухе
+      this._dust = dust && dust.visible;
+      if (dust) dust.visible = false;
     };
     aoPass.restoreVisibility = function() {
       camera.layers.mask = this._mask;
+      if (dust) dust.visible = this._dust;
     };
     composer.addPass(aoPass);
   }
   fxPass = new OffscreenFXPass(scenePass, 0.5);
   composer.addPass(fxPass);
+  if (VOL_ON) {
+    volPass = new VolumetricPass(scenePass, Q.vol, Q.volSteps);
+    composer.addPass(volPass);
+  }
   vmPass = new ViewmodelPass();
   composer.addPass(vmPass);
   if (Q.bloom) {
@@ -10130,7 +10477,7 @@ function getComposer() {
   return composer;
 }
 function getPasses() {
-  return { bloomPass, gradePass, smaaPass, aoPass };
+  return { bloomPass, gradePass, smaaPass, aoPass, volPass };
 }
 function getDust() {
   return dust;
@@ -10691,10 +11038,15 @@ var Particles = class {
       flame: `
         vec4 t = texture2D(map, frameUv());
         float k = vExt.y;
-        vec3 g = mix(vec3(1.0,0.84,0.52)*2.4, vec3(1.0,0.40,0.09)*1.5, smoothstep(0.0,0.5,k));
-        g = mix(g, vec3(0.5,0.08,0.02)*0.6, smoothstep(0.5,1.0,k));
-        float a = t.a*vCol.a*smoothstep(0.05, 0.6, vDepth);
-        gl_FragColor = vec4(t.rgb*g*vCol.rgb, a);
+        // температура пламени: ядро языка и молодые частицы горячее, кончики и старые — остывают.
+        // Цвет по шкале чёрного тела: тёмно-красный → оранжевый → жёлтый → почти белое ядро.
+        float core = clamp((t.g - 0.58)/0.42, 0.0, 1.0);
+        float T = clamp(core*0.8 + (1.0 - k)*0.6 + vExt.x*0.4 - 0.12, 0.0, 1.0);
+        vec3 g = mix(vec3(0.5,0.05,0.0)*1.1, vec3(1.0,0.32,0.04)*2.3, smoothstep(0.0, 0.38, T));
+        g = mix(g, vec3(1.0,0.62,0.18)*3.0, smoothstep(0.32, 0.72, T));
+        g = mix(g, vec3(1.0,0.88,0.64)*3.1, smoothstep(0.72, 1.0, T));
+        float a = t.a*vCol.a*smoothstep(0.05, 0.6, vDepth)*(0.7 + 0.3*smoothstep(0.0, 0.45, T));
+        gl_FragColor = vec4(g*vCol.rgb, a);
         if(a < 0.004) discard;`,
       smoke: `
         vec4 t = texture2D(map, frameUv());
@@ -16051,6 +16403,7 @@ function updateFire(dt, t) {
   }
   if (doTick) flushDestruction();
   updateLights(t);
+  updateFireGlow(t);
   SND.fire(clamp(near * 0.6, 0, 1), nearP);
   if (HOOKS.fireNear) HOOKS.fireNear();
 }
@@ -16119,13 +16472,15 @@ function emit(f, dt, t) {
     _fpe.copy(base2).addScaledVector(_ft1, rnd(-spread, spread)).addScaledVector(_ft2, f.free ? rnd(-spread, spread) : rnd(-0.1, 0.2) * I);
     if (!f.free) _fpe.addScaledVector(f.n, rnd(0.03, 0.14));
     const sz = rnd(0.26, 0.48) * (0.55 + I) * (1 + 0.5 * big);
+    // каждый четвёртый — длинный быстрый язык: пламя рвётся вверх, а не стоит шаром
+    const tongue = Math.random() < 0.25;
     FXS.flame.spawn({
       p: _fpe,
-      v: _fve.set(rnd(-0.15, 0.15), rnd(0.8, 1.6) * (0.6 + I), rnd(-0.15, 0.15)),
-      life: rnd(0.45, 0.9) * (1 + 0.3 * big),
+      v: _fve.set(rnd(-0.15, 0.15), rnd(0.8, 1.6) * (0.6 + I) * (tongue ? 1.5 : 1), rnd(-0.15, 0.15)),
+      life: rnd(0.45, 0.9) * (1 + 0.3 * big) * (tongue ? 0.8 : 1),
       s0: sz,
-      s1: sz * 0.35,
-      asp: 1.55,
+      s1: sz * (tongue ? 0.25 : 0.35),
+      asp: tongue ? rnd(2, 2.7) : 1.55,
       rot: rnd(-0.2, 0.2),
       spin: rnd(-0.4, 0.4),
       col: [0.75 + 0.35 * I, 0.75 + 0.35 * I, 0.75 + 0.35 * I],
@@ -16134,7 +16489,35 @@ function emit(f, dt, t) {
       drag: 0.9,
       turb: 1,
       fadeIn: 0.06,
-      fps: rnd(14, 22)
+      fps: rnd(14, 22),
+      heat: tongue ? 0.35 * I : 0
+    });
+  }
+  // горячее ядро у основания: короткоживущие яркие частицы, прижатые к топливу
+  f._cacc = (f._cacc || 0) + (4 + 9 * I) * qk * dt;
+  while (f._cacc >= 1) {
+    f._cacc -= 1;
+    const spread = 0.08 + 0.22 * I + 0.15 * big;
+    _fpe.copy(base2).addScaledVector(_ft1, rnd(-spread, spread)).addScaledVector(_ft2, f.free ? rnd(-spread, spread) : rnd(0, 0.1));
+    if (!f.free) _fpe.addScaledVector(f.n, 0.06);
+    const sz = rnd(0.2, 0.34) * (0.6 + I);
+    FXS.flame.spawn({
+      p: _fpe,
+      v: _fve.set(rnd(-0.08, 0.08), rnd(0.35, 0.7), rnd(-0.08, 0.08)),
+      life: rnd(0.22, 0.38),
+      s0: sz,
+      s1: sz * 0.6,
+      asp: 1.25,
+      rot: rnd(-0.3, 0.3),
+      spin: rnd(-0.6, 0.6),
+      col: [0.8 + 0.3 * I, 0.8 + 0.3 * I, 0.8 + 0.3 * I],
+      a0: 0.85,
+      a1: 0,
+      drag: 1.2,
+      turb: 0.6,
+      fadeIn: 0.03,
+      fps: rnd(18, 26),
+      heat: 1
     });
   }
   if (I > 0.55) {
@@ -16222,6 +16605,65 @@ function emit(f, dt, t) {
       g: -0.2
     });
   }
+  // треск: изредка — сноп коротких искр из очага
+  if (I > 0.4 && Math.random() < (0.35 + big) * I * dt) {
+    const n = 3 + Math.floor(Math.random() * 5);
+    for (let s = 0; s < n; s++) FXS.spark.spawn({
+      p: _fpe.copy(base2).add(_fve.set(rnd(-0.15, 0.15), rnd(0.1, 0.4), rnd(-0.15, 0.15))),
+      v: _fve.set(rnd(-1.8, 1.8), rnd(2, 5), rnd(-1.8, 1.8)),
+      life: rnd(0.35, 0.8),
+      s0: 0.03,
+      s1: 0.01,
+      col: [1, 0.62, 0.22],
+      a0: 1,
+      a1: 0,
+      g: -7,
+      drag: 0.5
+    });
+  }
+}
+// Засветка пола под очагами: точечных источников в пуле мало, а пятно тёплого света
+// под каждым огнём читается издалека. Один InstancedMesh на все очаги — один draw call.
+var FIRE_GLOW = null;
+var _fgM = new THREE.Matrix4();
+var _fgQ = new THREE.Quaternion();
+var _fgP = new THREE.Vector3();
+var _fgS = new THREE.Vector3();
+var _fgC = new THREE.Color();
+function updateFireGlow(t) {
+  if (!FIRE_GLOW) {
+    const g = new THREE.PlaneGeometry(1, 1);
+    g.rotateX(-Math.PI / 2);
+    const m = new THREE.MeshBasicMaterial({ map: FX.glow, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
+    FIRE_GLOW = new THREE.InstancedMesh(g, m, 24);
+    FIRE_GLOW.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(24 * 3), 3);
+    FIRE_GLOW.count = 0;
+    FIRE_GLOW.frustumCulled = false;
+    FIRE_GLOW.renderOrder = 2;
+    FIRE_GLOW.userData.nomerge = true;
+    FIRE_GLOW.layers.set(LAYER_FX);
+    scene.add(FIRE_GLOW);
+  }
+  let n = 0;
+  for (const f of FIRES) {
+    if (n >= 24) break;
+    if (f.I < 0.05) continue;
+    if (f._fy === void 0 || f.p.y < f._fy) f._fy = floorBelow(f.p);
+    const hgt = f.p.y - f._fy;
+    if (hgt > 2) continue;
+    const r = (1.8 + 3.4 * f.I) * (1 + 0.4 * clamp((f.cluster || 0) / 4, 0, 1));
+    const fl = 0.8 + 0.2 * Math.sin(t * 13 + n * 2.3) * Math.sin(t * 5.1 + n);
+    _fgP.set(f.p.x, f._fy + 0.012, f.p.z);
+    _fgS.set(r, 1, r);
+    _fgM.compose(_fgP, _fgQ, _fgS);
+    FIRE_GLOW.setMatrixAt(n, _fgM);
+    const k = 0.6 * f.I * fl * (1 - hgt / 2);
+    FIRE_GLOW.setColorAt(n, _fgC.setRGB(1 * k, 0.4 * k, 0.1 * k));
+    n++;
+  }
+  FIRE_GLOW.count = n;
+  FIRE_GLOW.instanceMatrix.needsUpdate = true;
+  FIRE_GLOW.instanceColor.needsUpdate = true;
 }
 function spawnEmbers(p, n) {
   for (let i = 0; i < n; i++) FXS.ember.spawn({
@@ -19416,6 +19858,7 @@ function api(stats) {
     PFX_U,
     getPasses,
     getComposer,
+    VOL,
     burn: (s = 1) => ignitePlayer(PL.eye, 1, s),
     step: (dt = 1 / 60, n = 1) => {
       for (let i = 0; i < n; i++) step(dt);

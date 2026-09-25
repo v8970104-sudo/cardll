@@ -14,6 +14,8 @@ const parts = {
 };
 // в коде не должно встречаться закрытие тега — иначе браузер оборвёт скрипт
 for (const k of ["game", "ammo"]) if (/<\/script/i.test(parts[k])) throw new Error(`${k}: содержит </script>`);
+// синтаксическая ошибка в игре иначе всплывёт только в браузере
+new Function(parts.game);
 
 let html = read("src/template.html");
 for (const [k, v] of Object.entries(parts)) {

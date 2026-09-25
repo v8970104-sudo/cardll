@@ -53,7 +53,9 @@ var Assembler = class _Assembler {
   }
   // Статическая совместимость: может ли модуль в принципе встать на это оружие.
   static fits(part, slot2, def) {
-    if (!slot2.accepts.includes(part.cat)) return false;
+    // пистолетные фонари держатся на любой планке 1913 — их можно ставить и на длинные стволы
+    const railLight = part.cat === "plight" && !part.pistolOnly && slot2.accepts.includes("light");
+    if (!slot2.accepts.includes(part.cat) && !railLight) return false;
     if (part.only && !part.only.includes(def.id)) return false;
     if (part.fit?.thread && !part.fit.thread.includes(slot2.thread || def.thread)) return false;
     if (part.fit?.iface && slot2.iface && !part.fit.iface.includes(slot2.iface)) return false;

@@ -52,7 +52,7 @@ var UI = class {
       <div><kbd>R</kbd>перезарядка</div><div><kbd>X</kbd>режим огня</div><div><kbd>V</kbd>сменить прицел</div>
       <div><kbd>N</kbd>откинуть увеличитель</div><div><kbd>Колесо</kbd>кратность / зум</div>
       <div><kbd>G</kbd>сменить прицельную сетку</div><div><kbd>Shift</kbd><kbd>G</kbd>цвет подсветки сетки</div><div><kbd>Y</kbd>трасса пули: след / трассер / выкл</div>
-      <div><kbd>C</kbd>фонарь (основной)</div><div><kbd>Shift</kbd><kbd>C</kbd>второй фонарь</div><div><kbd>Z</kbd>ЛЦУ (основной)</div><div><kbd>Shift</kbd><kbd>Z</kbd>второй ЛЦУ</div><div><kbd>U</kbd>заменить батареи</div><div><kbd>L</kbd>день / сумерки / ночь</div><div><kbd>B</kbd>сошки</div><div><kbd>K</kbd>приклад</div>
+      <div><kbd>C</kbd>фонарь (основной)</div><div><kbd>Shift</kbd><kbd>C</kbd>второй фонарь</div><div><kbd>Z</kbd>ЛЦУ (основной)</div><div><kbd>Shift</kbd><kbd>Z</kbd>второй ЛЦУ</div><div><kbd>U</kbd>заменить батареи</div><div><kbd>L</kbd>день / ночь (свет в тире)</div><div><kbd>Q</kbd>качество: авто / высокое / среднее / низкое</div><div><kbd>B</kbd>сошки</div><div><kbd>K</kbd>приклад</div>
       <div><kbd>T</kbd>${esc(d.chargeLabel || "затвор")}</div>${d.feed === "tube" ? "" : "<div><kbd>M</kbd>магазин</div>"}<div><kbd>H</kbd>эта подсказка</div>
       <div class="h-n">Клик по детали — открыть её слот. Перетаскивание — вращение, колесо — масштаб.</div>`);
     this.helpBtn = el("button", "btn help-btn", "?");
@@ -126,6 +126,7 @@ var UI = class {
     const asm = this.app.asm, cfg = this.app.cfg;
     if (part.needs && !part.needs(cfg, asm)) {
       if (part.cat === "magnifier") return "нужен коллиматор 1× с осью 39 мм";
+      if (part.needsWhy) return part.needsWhy;
       return "несовместимо с текущей сборкой";
     }
     if (slot2.rails) {

@@ -44,7 +44,8 @@ function t2(ctx, A) {
   k.add("lensBlack", at(tubeX(12.3, 11.6, -32, 32, { seg: 32 })));
   // интегральное основание и блок барабанов
   k.add("alu", extrudeX([[-11, A - 16, 2], [11, A - 16, 2], [11, A - 8], [-11, A - 8]], -17, 17, { bevel: 1 }));
-  k.add("alu", extrudeX(shape(rrect(0, A, 31.4, 31.4, 10)), -6, 12, { bevel: 1.2 }));
+  // блок барабанов охватывает трубку: канал на оси открыт
+  k.add("alu", extrudeX(shape(rrect(0, A, 31.4, 31.4, 10), [circle(0, A, 15.1, 40)]), -6, 12, { bevel: 1.2 }));
   optTurret(k, "alu", { cap: true, r: 7, h: 6.2, base: 1, knurl: 24 }, { p: [3, A + 15.4, 0] });
   optTurret(k, "alu", { cap: true, r: 7, h: 6.2, base: 1, knurl: 24 }, { r: [90, 0, 0], p: [3, A, 15.4] });
   // ручка яркости (12 положений) справа сзади
@@ -119,7 +120,8 @@ function mro(ctx, A) {
   k.add("alu", extrudeX([[-9, A - 14, 2], [9, A - 14, 2], [9, A - 9], [-9, A - 9]], -15, 15, { bevel: 1 }));
   k.add("alu", at(hollowLathe([[-30, 11.6], [-29, 12.8], [-24, 12.9], [-23.6, 13.3], [-20.5, 13.4], [-20, 13], [-8, 13.4], [14, 16.2], [26, 17.6], [30, 17.6], [31, 16.6]], 10.8, { seg: 44 })));
   k.add("lensBlack", at(tubeX(10.9, 10.2, -29, 30, { seg: 32 })));
-  k.add("alu", at(latheX([[-9, 0], [-9, 13.8], [-8, 14.4], [8, 15.2], [9, 14.6], [9, 0]], { seg: 32 })));
+  // поясок барабанов — кольцо вокруг трубки, канал на оси открыт
+  k.add("alu", at(hollowLathe([[-9, 13.8], [-8, 14.4], [8, 15.2], [9, 14.6]], 12.9, { seg: 32 })));
   optTurret(k, "alu", { cap: true, r: 6.6, h: 5.6, base: 1, knurl: 22 }, { p: [0, A + 14, 0] });
   optTurret(k, "alu", { cap: true, r: 6.6, h: 5.6, base: 1, knurl: 22 }, { r: [90, 0, 0], p: [0, A, 14.2] });
   dialZ(k, "alu", 8.6, 5.5, [-6, A, -13.8], -1, 8);
@@ -473,20 +475,150 @@ var mag1x39 = (cfg, asm) => {
   const s = it?.info?.sight;
   return !!s && s.mag === 1 && !s.zoom && Math.abs(s.y - 39) < 1.5;
 };
+// ---- прицелы и крепления из набора M416/АК/SCAR
+function cantOptic(ctx, name, body) {
+  const k = ctx.kit(), m = ctx.kit();
+  k.add("alu", clampBody(-13, 13, 5, { w: 24 }));
+  k.add("steel", crossBolt(0));
+  k.add("alu", extrudeX([[-12, 3, 1], [12, 3, 1], [31, 14, 3], [27, 22, 3], [6, 12, 3], [-12, 8, 2]], -13, 13, { bevel: 1.2 }));
+  for (const x of [-7, 7]) k.add("steel", T(cylX(1.9, 0, 1.4, { seg: 6 }).rotateY(Math.PI / 2), { p: [x, 17, 24] }));
+  m.add("alu", extrudeX(rrect(0, -1.5, 28, 5, 1.5), -24, 25, { bevel: 0.8 }));
+  const b = body(ctx, m);
+  const cant = node(name + "Cant", [m.build(), b.glass]);
+  cant.position.set(0, 16.5, 22);
+  cant.rotation.x = Math.PI / 4;
+  return {
+    root: node(name, [k.build(), cant]),
+    sight: { node: cant, y: b.A, z: 0, x0: b.x0, x1: b.x1, r: 9, mag: 1, reticle: b.reticle || "dot", lens: b.glass }
+  };
+}
+function dppBody(ctx, k) {
+  const A = 17;
+  k.add("alu", extrudeX(rrect(0, 4, 26, 8, 2), -24, 22, { bevel: 1.2 }));
+  k.add("alu", extrudeZ([[-24, 7], [-8, 7], [-8, 11], [-14, 13.5, 2], [-24, 12.5, 2]], 24, { bevel: 1.2 }));
+  const hood = shape([[-13, 7], [13, 7], [13, 22, 3], [8, 29, 5], [-8, 29, 5], [-13, 22, 3]], [[[-10, 8.6], [10, 8.6], [10, 21.5, 2], [6.5, 26.5, 4], [-6.5, 26.5, 4], [-10, 21.5, 2]]]);
+  k.add("alu", extrudeX(hood, 0, 17, { bevel: 1 }));
+  k.add("steel", T(box(10, 2.4, 20, { bevel: 0.6 }), { p: [8, 28.6, 0] }));
+  k.add("rubber", T(cylY(3, 11, 13.6, { seg: 16, c: 0.6 }), { p: [-18, 0, 0] }));
+  for (const s of [-1, 1]) k.add("steel", T(cylZ(2.2, 12.6, 13.6, { seg: 12 }), { p: [-4, 11, s > 0 ? 0 : -26.2] }));
+  const glass = lens(ctx, extrudeX(shape([[-9.6, 9], [9.6, 9], [9.6, 21, 2], [6, 26, 4], [-6, 26, 4], [-9.6, 21, 2]]), 11, 12, { bevel: 0.2 }), "glassAmber");
+  return { A, glass, x0: -24, x1: 17, reticle: "dot" };
+}
+function acroBody(ctx, k) {
+  const A = 16;
+  const sec = shape(rrect(0, 14, 30, 28, 5), [rrect(0, 16, 20, 17, 3)]);
+  k.add("alu", extrudeX(sec, -12, 16, { bevel: 1.4 }));
+  k.add("alu", extrudeX(rrect(0, 4, 30, 8, 2), -24, 16, { bevel: 1.2 }));
+  // задний торец закрытого корпуса — рамка с окном, прицельная линия через неё открыта
+  k.add("alu", extrudeX(shape(rrect(0, 14.5, 30, 15, 3), [rrect(0, 15.5, 20, 11, 2)]), -24, -12, { bevel: 1.2 }));
+  for (const s of [-1, 1]) k.add("rubber", T(box(6, 5, 1.6, { bevel: 0.6 }), { p: [-18, 12, s * 13.8] }));
+  k.add("steel", T(cylY(3.4, 1, 2, { seg: 20 }), { p: [-2, -1, 0] }));
+  const glass = lens(ctx, extrudeX(shape(rrect(0, 16, 20, 17, 3)), 12, 13, { bevel: 0.2 }), "glassBlue");
+  return { A, glass, x0: -12, x1: 16, reticle: "dot" };
+}
+function hs507Body(ctx, k) {
+  const A = rmrBody(ctx, k);
+  k.add("alu", T(box(16, 9, 2.2, { bevel: 0.8 }), { p: [-10, 5, 13.3] }));
+  k.add("steel", T(cylZ(1.5, 14.2, 15, { seg: 10 }), { p: [-15, 5, 0] }));
+  const glass = lens(ctx, extrudeX(shape(rrect(0, A + 0.5, 18.6, 13.4, 5)), 6, 7, { bevel: 0.2 }), "glassBlue");
+  return { A, glass, x0: -22, x1: 15, reticle: "cdot" };
+}
+function compm4(ctx) {
+  const k = ctx.kit();
+  const A = 39;
+  const at = (g, t = {}) => T(g, { ...t, p: [t.p?.[0] || 0, A + (t.p?.[1] || 0), t.p?.[2] || 0] });
+  k.add("alu", clampBody(-16, 16, 6));
+  k.add("alu", extrudeZ(shape([[-15, 5, 1], [15, 5, 1], [13, A - 17, 3], [-13, A - 17, 3]], [slot(-7, 7, (A - 12) / 2 + 3, 8)]), 20, { bevel: 1.2 }));
+  k.add("alu", at(tubeX(22.4, 19.6, -11, 11, { seg: 44, c: 1.2 })));
+  k.add("alu", extrudeX([[-6, A - 26], [6, A - 26], [6, A - 18], [-6, A - 18]], -11, 11, { bevel: 0.8 }));
+  k.add("alu", T(ctx.C.knob(11, 9, 20), { r: [0, -90, 0], p: [0, -1, 13] }));
+  k.add("steel", cylZ(3.4, -15, 13, { seg: 12 }), { p: [0, -1, 0] });
+  k.add("alu", at(hollowLathe([[-60, 18.8], [-59, 21], [-50, 21], [-48, 19.6], [36, 19.6], [40, 21.6], [58, 21.6], [60, 20.2]], [[-60, 15.2], [60, 17.4]], { seg: 48 })));
+  k.add("rubber", at(tubeX(21.4, 20.2, -58, -50, { seg: 44 })));
+  k.add("lensBlack", at(tubeX(17.5, 16.8, -58, 58, { seg: 32 })));
+  k.add("alu", at(ringGrooves(21.6, 44, 56, 4, 0.5, { seg: 44, rIn: 17.5 })));
+  // блок барабанов охватывает трубку: канал на оси открыт
+  k.add("alu", at(extrudeX(shape(rrect(0, 0, 34, 34, 9), [circle(0, 0, 16.4, 44)]), 8, 30, { bevel: 1.6 })));
+  k.add("alu", at(cylY(9.5, 16, 26, { c: 1.2, seg: 28 }), { p: [19, 0, 0] }));
+  k.add("alu", at(cylZ(9.5, 16, 26, { c: 1.2, seg: 28 }), { p: [19, 0, 0] }));
+  k.add("alu", at(cylX(9.4, 14, 58, { c: 1, seg: 28 }), { p: [0, -21, 0] }));
+  k.add("alu", at(extrudeX([[-7, -19], [7, -19], [7, -12], [-7, -12]], 14, 58, { bevel: 0.8 })));
+  k.add("alu", at(ctx.C.knob(10, 8, 24), { r: [0, 0, -90], p: [58, -21, 0] }));
+  k.add("alu", at(ctx.C.knob(9, 7, 20), { r: [0, 90, 0], p: [-30, 0, -19.5] }));
+  const root = node("compm4", [k.build()]);
+  root.add(lens(ctx, at(ctx.C.lensDisc(15.4, -57)), "glassBlue"));
+  const front = lens(ctx, at(ctx.C.lensDisc(17.4, 57)), "glassRed");
+  root.add(front);
+  return { root, sight: { y: A, z: 0, x0: -60, x1: 60, r: 15, mag: 1, reticle: "dot", lens: front } };
+}
+function rmrRiser(ctx) {
+  const k = ctx.kit(), m = ctx.kit();
+  const H = 24;
+  k.add("alu", clampBody(-17, 17, 5, { w: 25 }));
+  k.add("steel", crossBolt(-8));
+  k.add("steel", crossBolt(8));
+  k.add("alu", extrudeZ(shape([[-18, 4, 1], [18, 4, 1], [17, H, 1.5], [-17, H, 1.5]], [slot(-10, 10, H / 2 + 2, 8)]), 24, { bevel: 1 }));
+  k.add("alu", extrudeX(rrect(0, H - 1.5, 26, 3, 1), -22, 22, { bevel: 0.6 }));
+  const A = rmrBody(ctx, m);
+  const glass = lens(ctx, extrudeX(shape(rrect(0, A + 0.5, 18.6, 13.4, 5)), 6, 7, { bevel: 0.2 }), "glassAmber");
+  const body = node("rmr", [m.build(), glass]);
+  body.position.set(-3, H, 0);
+  return { root: node("rmr_riser", [k.build(), body]), sight: { node: body, y: A, z: 0, x0: -22, x1: 15, r: 9, mag: 1, reticle: "dot", lens: glass } };
+}
+function pk120(ctx) {
+  const k = ctx.kit();
+  const A = 40;
+  k.add("alu", clampBody(-24, 24, 6));
+  k.add("steel", crossBolt(-10));
+  k.add("steel", T(ctx.C.knob(8, 7, 18), { r: [0, -90, 0], p: [12, -1, 13] }));
+  k.add("alu", extrudeX([[-15, 5, 1], [15, 5, 1], [15, A - 16, 2], [-15, A - 16, 2]], -30, 30, { bevel: 1.2 }));
+  const oct = (w, h, c, cy) => [[-w + c, cy - h], [w - c, cy - h], [w, cy - h + c], [w, cy + h - c], [w - c, cy + h], [-w + c, cy + h], [-w, cy + h - c], [-w, cy - h + c]];
+  k.add("alu", extrudeX(shape(oct(20, 17, 6, A), [oct(16, 13, 5, A)]), -34, 34, { bevel: 1.2 }));
+  k.add("alu", extrudeX(shape(oct(21, 18, 6.5, A), [oct(16.5, 13.5, 5, A)]), 26, 36, { bevel: 1 }));
+  k.add("alu", T(cylX(7.5, -30, 6, { c: 1, seg: 24 }), { p: [0, A - 4, 24] }));
+  k.add("alu", T(ctx.C.knob(7.8, 5, 18), { r: [0, 180, 0], p: [-30, A - 4, 24] }));
+  k.add("alu", T(ctx.C.knob(9, 7, 22), { r: [0, 90, 0], p: [-18, A - 6, -20] }));
+  const root = node("pk120", [k.build()]);
+  const win = lens(ctx, extrudeX(shape(oct(16, 13, 5, A)), 24, 25, { bevel: 0.2 }), "glassRed");
+  root.add(win);
+  return { root, sight: { y: A, z: 0, x0: -34, x1: 36, r: 12, mag: 1, reticle: "dot", lens: win } };
+}
+function okp7(ctx) {
+  const k = ctx.kit();
+  const Y = 50, Z = 19;
+  k.add("steel", extrudeX(shape([[-3, -9, 1], [4, -9], [4, 9], [-3, 9, 1], [-11, 7, 2], [-11, -7, 2]]), -46, 46, { bevel: 0.8 }));
+  k.add("steel", T(ctx.C.knob(7, 6, 18), { r: [0, 90, 0], p: [-26, 0, -11] }));
+  k.add("alu", extrudeX(shape([[-11, 6, 2], [4, 6, 2], [Z - 6, Y - 18, 3], [Z - 10, Y - 12, 3], [-11, 20, 2]]), -44, 44, { bevel: 1.4 }));
+  const trap = (w0, w1, y0, y1) => [[Z - w0, y0, 2], [Z + w0, y0, 2], [Z + w1, y1, 5], [Z - w1, y1, 5]];
+  k.add("alu", extrudeX(shape(trap(22, 17, Y - 17, Y + 15), [trap(17.5, 13.5, Y - 13, Y + 11.5)]), -48, 40, { bevel: 1.4 }));
+  k.add("alu", extrudeX([[Z - 18, Y - 22, 2], [Z + 18, Y - 22, 2], [Z + 18, Y - 16], [Z - 18, Y - 16]], -48, -8, { bevel: 1 }));
+  k.add("alu", T(ctx.C.knob(8, 6, 20), { r: [0, -90, 0], p: [-30, Y - 6, Z + 21] }));
+  const root = node("okp7", [k.build()]);
+  const win = lens(ctx, extrudeX(shape(trap(17.5, 13.5, Y - 13, Y + 11.5)), 30, 31, { bevel: 0.2 }), "glassAmber");
+  root.add(win);
+  return { root, sight: { y: Y - 1, z: Z, x0: -48, x1: 31, r: 12, mag: 1, reticle: "dot", lens: win } };
+}
 var OPTICS = [
-  { id: "t2_low", cat: "optic", name: "Aimpoint Micro T-2", desc: "Коллиматор, низкое крепление (ось 20 мм). Для высоких планок АК", foot: [-18, 18], body: [-38, 38], stats: { weight: 135, ergo: -1, adsTime: 8 }, build: (c) => t2(c, 20) },
+  { id: "t2_low", cat: "optic", name: "Aimpoint Micro T-2", desc: "Коллиматор, низкое крепление (ось 20 мм). Для высоких планок АК", needs: (cfg) => !cfg.rearsight, needsWhy: "ось 20 мм ниже сложенного целика — снимите целик", foot: [-18, 18], body: [-38, 38], stats: { weight: 135, ergo: -1, adsTime: 8 }, build: (c) => t2(c, 20) },
   { id: "t2_lrp", cat: "optic", name: "Aimpoint T-2 + LRP 39 мм", desc: "Коллиматор на кронштейне, нижняя треть с механикой AR", foot: [-18, 18], body: [-38, 38], stats: { weight: 190, ergo: -1, adsTime: 10 }, build: (c) => t2(c, 39) },
+  { id: "compm4", cat: "optic", name: "Aimpoint CompM4s", desc: "Армейский коллиматор, точка 2 MOA, батарея АА на 8 лет", foot: [-16, 16], body: [-62, 62], stats: { weight: 380, ergo: -3, adsTime: 14 }, build: compm4 },
+  { id: "rmr_riser", cat: "optic", name: "Trijicon RMR на райзере Unity", desc: "Мини-коллиматор открытого типа, самый лёгкий", foot: [-17, 17], body: [-25, 22], stats: { weight: 90, ergo: 0, adsTime: 6 }, build: rmrRiser },
   { id: "exps3", cat: "optic", name: "EOTech EXPS3", desc: "Голографический, кольцо 68 MOA с точкой", foot: [-22, 22], body: [-48, 46], stats: { weight: 320, ergo: -3, adsTime: 14 }, build: (c) => exps3(c) },
+  { id: "xps2", cat: "optic", name: "EOTech XPS2", desc: "Короткий голографический, одна батарея CR123", foot: [-18, 18], body: [-40, 46], stats: { weight: 255, ergo: -2, adsTime: 12 }, build: (c) => exps3(c, { xps2: true }) },
   { id: "mro", cat: "optic", name: "Trijicon MRO", desc: "Коллиматор-трубка, объектив 25 мм, точка 2 MOA, нижняя треть", foot: [-20, 20], body: [-31, 32], stats: { weight: 150, ergo: -1, adsTime: 9 }, build: (c) => mro(c, 39) },
   { id: "hs510c", cat: "optic", name: "Holosun HS510C", desc: "Открытый коллиматор с рамкой, кольцо 65 MOA + точка, широкое поле", foot: [-22, 22], body: [-34, 30], stats: { weight: 250, ergo: -2, adsTime: 10 }, build: hs510c },
-  { id: "xps2", cat: "optic", name: "EOTech XPS2", desc: "Короткий голографический, одна батарея CR123", foot: [-18, 18], body: [-40, 46], stats: { weight: 255, ergo: -2, adsTime: 12 }, build: (c) => exps3(c, { xps2: true }) },
+  { id: "pk120", cat: "optic", name: "ПК-120 (БелОМО)", desc: "Коллиматор в защищённом кожухе-тоннеле", foot: [-24, 24], body: [-40, 37], stats: { weight: 310, ergo: -2, adsTime: 12 }, build: pk120 },
+  { id: "okp7d", cat: "optic", name: "ОКП-7Д «Валдай»", desc: "Низкий коллиматор на боковую планку АК, окно над крышкой", mountTypes: ["dovetail"], only: ["akm", "ak74"], foot: [-46, 46], body: [-48, 46], needs: (cfg) => !cfg.sidemount, stats: { weight: 290, ergo: -2, adsTime: 11 }, build: okp7 },
   { id: "acog", cat: "optic", name: "Trijicon ACOG TA31 4×32", desc: "Призменный 4×, шеврон с дальномерной шкалой", foot: [-32, 32], body: [-75, 76], stats: { weight: 480, ergo: -6, adsTime: 40 }, build: acog },
   { id: "lpvo", cat: "optic", name: "Прицел 1–6×24", desc: "Переменная кратность, колёсико — зум в прицеле", foot: [-38, 34], body: [-132, 106], stats: { weight: 720, ergo: -9, adsTime: 55 }, build: lpvo },
+  { id: "mk5hd", cat: "optic", name: "Leupold Mark 5HD 3,6–18×44", desc: "Снайперский, трубка 35 мм, сетка mil-dot, колесо — кратность", foot: [-58, 34], body: [-178, 112], stats: { weight: 880, ergo: -12, adsTime: 70 }, build: (c) => sniperScope(c, { name: "mk5hd", A: 36, tube: 17.5, obj: 23, turret: 15, x0: -178, x1: 112, saddle: -12, saddleL: 20, rings: [-48, 24], zoom: [3.6, 18], eyeRelief: 92 }) },
+  { id: "sb_pm2", cat: "optic", name: "Schmidt & Bender PM II 5–25×56", desc: "Тяжёлый дальнобойный прицел, объектив 56 мм — высокие кольца", foot: [-56, 36], body: [-190, 142], stats: { weight: 1100, ergo: -15, adsTime: 85 }, build: (c) => sniperScope(c, { name: "pm2", A: 44, tube: 17.5, obj: 29, turret: 16, x0: -190, x1: 142, saddle: -8, saddleL: 20, rings: [-46, 26], zoom: [5, 25], eyeRelief: 90 }) },
   { id: "mag3x", cat: "magnifier", name: "Aimpoint 3XMag-1 + FTS", desc: "Увеличитель 3×, откидывается вбок", foot: [-16, 16], body: [-57, 55], needs: mag1x39, stats: { weight: 330, ergo: -4, adsTime: 20 }, build: magnifier },
   { id: "pvs14", cat: "magnifier", name: "Монокуляр AN/PVS-14", desc: "ПНВ за коллиматором на откидном кронштейне (N — откинуть)", foot: [-16, 16], body: [-86, 60], needs: mag1x39, stats: { weight: 420, ergo: -6, adsTime: 25 }, build: pvs14 },
   { id: "rmr_off", cat: "offset", side: true, name: "Trijicon RMR на 45° кронштейне", desc: "Мини-коллиматор сбоку для ближнего боя: V — переключиться, оружие заваливается", foot: [-12, 12], body: [-23, 24], stats: { weight: 95, ergo: -1 }, build: rmrOffset },
-  { id: "mk5hd", cat: "optic", name: "Leupold Mark 5HD 3,6–18×44", desc: "Снайперский, трубка 35 мм, сетка mil-dot, колесо — кратность", foot: [-58, 34], body: [-178, 112], stats: { weight: 880, ergo: -12, adsTime: 70 }, build: (c) => sniperScope(c, { name: "mk5hd", A: 36, tube: 17.5, obj: 23, turret: 15, x0: -178, x1: 112, saddle: -12, saddleL: 20, rings: [-48, 24], zoom: [3.6, 18], eyeRelief: 92 }) },
-  { id: "sb_pm2", cat: "optic", name: "Schmidt & Bender PM II 5–25×56", desc: "Тяжёлый дальнобойный прицел, объектив 56 мм — высокие кольца", foot: [-56, 36], body: [-190, 142], stats: { weight: 1100, ergo: -15, adsTime: 85 }, build: (c) => sniperScope(c, { name: "pm2", A: 44, tube: 17.5, obj: 29, turret: 16, x0: -190, x1: 142, saddle: -8, saddleL: 20, rings: [-46, 26], zoom: [5, 25], eyeRelief: 90 }) },
+  { id: "dpp_off", cat: "offset", side: true, name: "Leupold DeltaPoint Pro на 45°", desc: "Наклонный коллиматор с большим окном, точка 2,5 MOA (V — переключиться)", foot: [-13, 13], body: [-24, 25], stats: { weight: 110, ergo: -1 }, build: (c) => cantOptic(c, "dpp_off", dppBody) },
+  { id: "acro_off", cat: "offset", side: true, name: "Aimpoint ACRO P-2 на 45°", desc: "Наклонный закрытый коллиматор: излучатель защищён от грязи и воды", foot: [-13, 13], body: [-24, 25], stats: { weight: 120, ergo: -1 }, build: (c) => cantOptic(c, "acro_off", acroBody) },
+  { id: "hs507_off", cat: "offset", side: true, name: "Holosun HS507C на 45°", desc: "Наклонный коллиматор: кольцо 32 MOA + точка, боковой лоток батареи", foot: [-13, 13], body: [-24, 25], stats: { weight: 100, ergo: -1 }, build: (c) => cantOptic(c, "hs507_off", hs507Body) },
   { id: "mbus_rear", cat: "rearsight", name: "Magpul MBUS (целик)", desc: "Складной диоптр, полимер", foot: [-13, 13], body: [-13, 13], stats: { weight: 34 }, build: mbusRear },
   { id: "mbus_front", cat: "frontsight", name: "Magpul MBUS (мушка)", desc: "Складная мушка, полимер", foot: [-13, 13], body: [-13, 13], stats: { weight: 26 }, build: mbusFront }
 ];

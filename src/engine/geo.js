@@ -14,9 +14,11 @@ __export(geo_exports, {
   extrudeY: () => extrudeY,
   extrudeZ: () => extrudeZ,
   flutesX: () => flutesX,
+  gripLoft: () => gripLoft,
   latheX: () => latheX,
   loftX: () => loftX,
   loftPath: () => loftPath,
+  loftY: () => loftY,
   merge: () => merge,
   mirrorZ: () => mirrorZ,
   mlokHoles: () => mlokHoles,
@@ -30,6 +32,7 @@ __export(geo_exports, {
   rrect: () => rrect,
   screwHead: () => screwHead,
   shape: () => shape,
+  sideLoft: () => sideLoft,
   slot: () => slot,
   sphere: () => sphere,
   spring: () => spring,
@@ -179,7 +182,7 @@ function flipWinding(g) {
 }
 function latheX(prof, o = {}) {
   const seg = o.seg ?? 32;
-  const a0 = (o.a0 ?? 0) * D2R, arc = (o.arc ?? 360) * D2R;
+  const a0 = (o.a0 ?? 0) * D2R, arc2 = (o.arc ?? 360) * D2R;
   const crease = Math.cos((o.crease ?? 40) * D2R);
   const pts = prof.filter((p, i) => i === 0 || p[0] !== prof[i - 1][0] || p[1] !== prof[i - 1][1]);
   const segN = [];
@@ -215,11 +218,11 @@ function latheX(prof, o = {}) {
     const sl = Math.hypot(x1 - x0, r1 - r0);
     const base = pos.length / 3;
     for (let j = 0; j <= seg; j++) {
-      const a = a0 + j / seg * arc;
+      const a = a0 + j / seg * arc2;
       const c = Math.cos(a), s = Math.sin(a);
       pos.push(x0, r0 * c, r0 * s, x1, r1 * c, r1 * s);
       nor.push(nA[0], nA[1] * c, nA[1] * s, nB[0], nB[1] * c, nB[1] * s);
-      const u = j / seg * arc * Math.max(r0, r1, 1);
+      const u = j / seg * arc2 * Math.max(r0, r1, 1);
       uv.push(u, vlen, u, vlen + sl);
     }
     vlen += sl;
@@ -382,14 +385,17 @@ function screwHead(r = 2.4, h = 1.2, o = {}) {
 function pin(r = 2, len = 2) {
   return cylZ(r, -len / 2, len / 2, { c: 0.25, seg: 14 });
 }
+// Рифлёный поясок. o.rIn — внутренний радиус: кольцо вместо сплошного тела (корпуса прицелов с каналом)
 function ringGrooves(r, x0, x1, n, depth = 0.5, o = {}) {
-  const prof = [[x0, 0], [x0, r]];
+  const r0 = o.rIn ?? 0;
+  const prof = [[x0, r0], [x0, r]];
   const step = (x1 - x0) / n;
   for (let i = 0; i < n; i++) {
     const a = x0 + i * step;
     prof.push([a + step * 0.2, r], [a + step * 0.35, r - depth], [a + step * 0.65, r - depth], [a + step * 0.8, r]);
   }
-  prof.push([x1, r], [x1, 0]);
+  prof.push([x1, r], [x1, r0]);
+  if (r0 > 0) prof.push([x0, r0]);
   return latheX(prof, { seg: o.seg ?? 28 });
 }
 function flutesX(r, x0, x1, n, w, h, o = {}) {
@@ -464,6 +470,97 @@ function loftX(rings, o = {}) {
   ng.setAttribute("uv", new THREE3.BufferAttribute(uv, 2));
   return toCreasedNormals(ng, (o.crease ?? 40) * D2R);
 }
+function superEllipse(a, b, k = 3, n = 32, cy = 0, cz = 0) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / n * Math.PI * 2;
+    const c = Math.cos(t), s = Math.sin(t);
+    out.push([cz + a * Math.sign(c) * Math.pow(Math.abs(c), 2 / k), cy + b * Math.sign(s) * Math.pow(Math.abs(s), 2 / k)]);
+  }
+  return out;
+}
+function loftY(rings, o = {}) {
+  const r2 = rings.map((r) => ({ x: r.y, pts: r.pts.map(([x, z]) => [z, x]) }));
+  const g = loftX(r2, o);
+  const p = g.attributes.position, n = g.attributes.normal;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i);
+    p.setXY(i, y, x);
+    const nx = n.getX(i), ny = n.getY(i);
+    n.setXY(i, ny, nx);
+  }
+  for (let i = 0; i < n.count; i++) n.setXYZ(i, -n.getX(i), -n.getY(i), -n.getZ(i));
+  return g;
+}
+function gripLoft(front, back, o = {}) {
+  const at = (pts, y) => {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+      if (y <= y0 && y >= y1 || y >= y0 && y <= y1) return x0 + (x1 - x0) * ((y - y0) / (y1 - y0 || 1));
+    }
+    return y > pts[0][1] ? pts[0][0] : pts[pts.length - 1][0];
+  };
+  const yTop = Math.min(front[0][1], back[0][1]), yBot = Math.max(front[front.length - 1][1], back[back.length - 1][1]);
+  const N = o.rings ?? 18, M = o.seg ?? 28, W = (o.w ?? 30) / 2, k = o.k ?? 2.6, taper = o.taper ?? 0.28;
+  const rings = [];
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, y = yTop + (yBot - yTop) * t;
+    const xf = at(front, y), xb = at(back, y);
+    const cx = (xf + xb) / 2, a3 = Math.abs(xf - xb) / 2;
+    const wk = o.width ? o.width(t) : 1;
+    const end = i === N ? 0.9 : 1;
+    const pts = [];
+    for (let j = 0; j < M; j++) {
+      const th = j / M * Math.PI * 2, c2 = Math.cos(th), s = Math.sin(th);
+      const ex = Math.sign(c2) * Math.pow(Math.abs(c2), 2 / k), ez = Math.sign(s) * Math.pow(Math.abs(s), 2 / k);
+      const zk = 1 - taper * Math.max(0, c2) ** 2;
+      pts.push([cx + a3 * ex * end, W * wk * zk * ez * end]);
+    }
+    rings.push({ y, pts });
+  }
+  const g = loftY(rings, { crease: o.crease ?? 60 });
+  const p = g.attributes.position, nr = g.attributes.normal;
+  const c = new THREE3.Vector3(), a = new THREE3.Vector3(), b = new THREE3.Vector3(), d = new THREE3.Vector3(), f = new THREE3.Vector3();
+  for (let i = 0; i < p.count; i++) c.add(a.fromBufferAttribute(p, i));
+  c.divideScalar(p.count);
+  for (let t = 0; t < p.count; t += 3) {
+    a.fromBufferAttribute(p, t);
+    b.fromBufferAttribute(p, t + 1);
+    d.fromBufferAttribute(p, t + 2);
+    f.crossVectors(b.clone().sub(a), d.clone().sub(a));
+    if (f.dot(a.add(b).add(d).divideScalar(3).sub(c)) >= 0) continue;
+    for (const attr of [p, nr, g.attributes.uv]) {
+      if (!attr) continue;
+      for (let k2 = 0; k2 < attr.itemSize; k2++) {
+        const v = attr.array[(t + 1) * attr.itemSize + k2];
+        attr.array[(t + 1) * attr.itemSize + k2] = attr.array[(t + 2) * attr.itemSize + k2];
+        attr.array[(t + 2) * attr.itemSize + k2] = v;
+      }
+    }
+    for (let k2 = t; k2 < t + 3; k2++) nr.setXYZ(k2, -nr.getX(k2), -nr.getY(k2), -nr.getZ(k2));
+  }
+  return g;
+}
+function sideLoft(upper, lower, o = {}) {
+  const at = (pts, x) => {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [x02, y0] = pts[i], [x12, y1] = pts[i + 1];
+      if (x >= x02 && x <= x12) return y0 + (y1 - y0) * ((x - x02) / (x12 - x02 || 1));
+    }
+    return x < pts[0][0] ? pts[0][1] : pts[pts.length - 1][1];
+  };
+  const x0 = Math.max(upper[0][0], lower[0][0]), x1 = Math.min(upper[upper.length - 1][0], lower[lower.length - 1][0]);
+  const N = o.rings ?? 24, M = o.seg ?? 32, W = (o.w ?? 30) / 2, k = o.k ?? 3.2;
+  const rings = [];
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, x = x0 + (x1 - x0) * t;
+    const yu = at(upper, x), yl = at(lower, x);
+    const wk = o.width ? o.width(t) : 1;
+    const end = i === 0 && o.round0 || i === N && o.round1 ? 0.92 : 1;
+    rings.push({ x, pts: superEllipse(W * wk * end, Math.abs(yu - yl) / 2 * end, k, M, (yu + yl) / 2, 0) });
+  }
+  return loftX(rings, { crease: o.crease ?? 60, flip: true });
+}
 // Лофт по кривой оси в плоскости XY (рукояти, шейки прикладов). secs: [{c:[x,y], a, b, k?, f?, r?}]
 // a — полутолщина вдоль нормали к оси (спереди/сзади), b — полуширина по Z, f — смещение центра
 // сечения вдоль нормали (выемки под пальцы, горб), r — радиус-скругление передней грани (0…1: доля a).
@@ -524,14 +621,3 @@ function loftPath(secs, o = {}) {
   ng.setAttribute("uv", new THREE3.BufferAttribute(uv, 2));
   return toCreasedNormals(ng, (o.crease ?? 60) * D2R);
 }
-function superEllipse(a, b, k = 3, n = 32, cy = 0, cz = 0) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = i / n * Math.PI * 2;
-    const c = Math.cos(t), s = Math.sin(t);
-    out.push([cz + a * Math.sign(c) * Math.pow(Math.abs(c), 2 / k), cy + b * Math.sign(s) * Math.pow(Math.abs(s), 2 / k)]);
-  }
-  return out;
-}
-
-

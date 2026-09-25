@@ -1,0 +1,4 @@
+.hoplite/
+node_modules/
+*.png
+!docs/**/*.png

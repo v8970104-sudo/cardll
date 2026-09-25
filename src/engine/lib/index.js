@@ -1,0 +1,2 @@
+var LIB = [...OPTICS, ...DOVETAIL, ...MUZZLES, ...TACTICAL, ...PISTOL, ...GRIPS];
+
